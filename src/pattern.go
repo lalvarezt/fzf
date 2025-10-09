@@ -64,6 +64,7 @@ type Pattern struct {
 	procFun       map[termType]algo.Algo
 	cache         *ChunkCache
 	denylist      map[int32]struct{}
+	frecencyDB    *FrecencyDB
 }
 
 var _splitRegex *regexp.Regexp
@@ -345,7 +346,7 @@ func (p *Pattern) matchChunk(chunk *Chunk, space []Result, slab *util.Slab) []Re
 func (p *Pattern) MatchItem(item *Item, withPos bool, slab *util.Slab) (*Result, []Offset, *[]int) {
 	if p.extended {
 		if offsets, bonus, pos := p.extendedMatch(item, withPos, slab); len(offsets) == len(p.termSets) {
-			result := buildResult(item, offsets, bonus)
+			result := buildResult(item, offsets, bonus, p.frecencyDB)
 			return &result, offsets, pos
 		}
 		return nil, nil, nil
@@ -353,7 +354,7 @@ func (p *Pattern) MatchItem(item *Item, withPos bool, slab *util.Slab) (*Result,
 	offset, bonus, pos := p.basicMatch(item, withPos, slab)
 	if sidx := offset[0]; sidx >= 0 {
 		offsets := []Offset{offset}
-		result := buildResult(item, offsets, bonus)
+		result := buildResult(item, offsets, bonus, p.frecencyDB)
 		return &result, offsets, pos
 	}
 	return nil, nil, nil

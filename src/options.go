@@ -56,6 +56,8 @@ Usage: fzf [options]
     --read0                  Read input delimited by ASCII NUL characters
     --print0                 Print output delimited by ASCII NUL characters
     --ansi                   Enable processing of ANSI color codes
+    --frecency               Enable frecency-based sorting (frequency + recency)
+    --frecency-file=PATH     Path to frecency database file
     --sync                   Synchronous search for multi-staged filtering
 
   GLOBAL STYLE
@@ -264,6 +266,7 @@ const (
 	byBegin
 	byEnd
 	byPathname
+	byFrecency
 )
 
 type heightSpec struct {
@@ -573,6 +576,8 @@ type Options struct {
 	Criteria          []criterion
 	Multi             int
 	Ansi              bool
+	Frecency          bool
+	FrecencyFile      string
 	Mouse             bool
 	BaseTheme         *tui.ColorTheme
 	Theme             *tui.ColorTheme
@@ -2752,6 +2757,14 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			opts.Ansi = true
 		case "--no-ansi":
 			opts.Ansi = false
+		case "--frecency":
+			opts.Frecency = true
+		case "--no-frecency":
+			opts.Frecency = false
+		case "--frecency-file":
+			if opts.FrecencyFile, err = nextString("file path required"); err != nil {
+				return err
+			}
 		case "--no-mouse":
 			opts.Mouse = false
 		case "+c", "--no-color":
@@ -3673,6 +3686,11 @@ func postProcessOptions(opts *Options) error {
 
 	if err := opts.initProfiling(); err != nil {
 		return errors.New("failed to start pprof profiles: " + err.Error())
+	}
+
+	// Prepend byFrecency when --frecency flag is set
+	if opts.Frecency {
+		opts.Criteria = append([]criterion{byFrecency}, opts.Criteria...)
 	}
 
 	algo.Init(opts.Scheme)

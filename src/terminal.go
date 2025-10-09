@@ -402,6 +402,7 @@ type Terminal struct {
 	previewed          previewed
 	previewBox         *util.EventBox
 	eventBox           *util.EventBox
+	frecencyDB         *FrecencyDB
 	mutex              sync.Mutex
 	uiMutex            sync.Mutex
 	initFunc           func() error
@@ -1864,11 +1865,21 @@ func (t *Terminal) output() bool {
 	if !found {
 		current := t.currentItem()
 		if current != nil {
+			// Update frecency for current item
+			if t.frecencyDB != nil {
+				t.frecencyDB.Update(current.AsString(t.ansi))
+				t.frecencyDB.dirty = true
+			}
 			t.printer(transform(current))
 			found = true
 		}
 	} else {
 		for _, sel := range t.sortSelected() {
+			// Update frecency for each selected item
+			if t.frecencyDB != nil {
+				t.frecencyDB.Update(sel.item.AsString(t.ansi))
+				t.frecencyDB.dirty = true
+			}
 			t.printer(transform(sel.item))
 		}
 	}

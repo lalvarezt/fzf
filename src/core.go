@@ -2,6 +2,7 @@
 package fzf
 
 import (
+	"fmt"
 	"maps"
 	"os"
 	"sync"
@@ -55,6 +56,38 @@ func Run(opts *Options) (int, error) {
 	}
 
 	defer util.RunAtExitFuncs()
+
+	// Frecency database
+	var frecencyDB *FrecencyDB
+	if opts.Frecency {
+		path := opts.FrecencyFile
+		if path == "" {
+			var err error
+			path, err = getDefaultFrecencyPath()
+			if err != nil {
+				// Warn but continue without frecency
+				fmt.Fprintf(os.Stderr, "Warning: could not determine frecency path: %v\n", err)
+			}
+		}
+
+		// Initialize and load database if path was determined
+		if path != "" {
+			frecencyDB = NewFrecencyDB(path)
+			if err := frecencyDB.Load(); err != nil {
+				// Warn but continue with empty DB
+				fmt.Fprintf(os.Stderr, "Warning: could not load frecency database: %v\n", err)
+			}
+
+			// Save on exit
+			defer func() {
+				if frecencyDB != nil && frecencyDB.dirty {
+					if err := frecencyDB.Save(); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: could not save frecency database: %v\n", err)
+					}
+				}
+			}()
+		}
+	}
 
 	// Output channel given
 	if opts.Output != nil {
@@ -172,6 +205,8 @@ func Run(opts *Options) (int, error) {
 		if err != nil {
 			return ExitError, err
 		}
+		// Wire frecency DB to terminal
+		terminal.frecencyDB = frecencyDB
 		if len(initialReload) > 0 {
 			var temps []string
 			initialReload, temps = terminal.replacePlaceholderInInitialCommand(initialReload)
@@ -228,9 +263,12 @@ func Run(opts *Options) (int, error) {
 		denyMutex.Lock()
 		denylistCopy := maps.Clone(denylist)
 		denyMutex.Unlock()
-		return BuildPattern(cache, patternCache,
+		pattern := BuildPattern(cache, patternCache,
 			opts.Fuzzy, opts.FuzzyAlgo, opts.Extended, opts.Case, opts.Normalize, forward, withPos,
 			opts.Filter == nil, nth, opts.Delimiter, inputRevision, runes, denylistCopy)
+		// Inject frecency DB reference
+		pattern.frecencyDB = frecencyDB
+		return pattern
 	}
 	matcher := NewMatcher(cache, patternBuilder, sort, opts.Tac, eventBox, inputRevision)
 

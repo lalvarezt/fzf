@@ -28,7 +28,7 @@ type Result struct {
 	points [4]uint16
 }
 
-func buildResult(item *Item, offsets []Offset, score int) Result {
+func buildResult(item *Item, offsets []Offset, score int, frecencyDB *FrecencyDB) Result {
 	if len(offsets) > 1 {
 		sort.Sort(ByOrder(offsets))
 	}
@@ -103,6 +103,15 @@ func buildResult(item *Item, offsets []Offset, score int) Result {
 				} else {
 					val = util.AsUint16(math.MaxUint16 - math.MaxUint16*(maxEnd-whitePrefixLen)/(int(item.TrimLength())+1))
 				}
+			}
+		case byFrecency:
+			if frecencyDB != nil {
+				// Get frecency score for this item
+				frecencyScore := frecencyDB.GetScore(item.text.ToString())
+				// Scale and invert: higher frecency = lower value (better rank)
+				// Frecency scores typically range from 0-100+, scale to uint16
+				scaledScore := uint16(math.Min(frecencyScore*100, math.MaxUint16))
+				val = math.MaxUint16 - scaledScore
 			}
 		}
 		result.points[3-idx] = val

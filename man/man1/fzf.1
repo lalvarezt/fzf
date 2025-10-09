@@ -214,6 +214,22 @@ Print output delimited by ASCII NUL characters instead of newline characters
 .B "\-\-ansi"
 Enable processing of ANSI color codes
 .TP
+.B "\-\-frecency"
+Enable frecency-based sorting that combines frequency (how often items are
+selected) and recency (when they were last selected). When enabled, frecency
+scoring is automatically prepended to the sort criteria, prioritizing items
+you use most frequently and most recently.
+.TP
+.BI "\-\-frecency\-file=" "PATH"
+Specify a custom path for the frecency database file. By default, fzf stores
+the frecency data in a platform-specific cache directory:
+.br
+- Linux: \fB~/.cache/fzf/frecency.gob\fR
+.br
+- macOS: \fB~/Library/Caches/fzf/frecency.gob\fR
+.br
+- Windows: \fB%LocalAppData%\\fzf\\frecency.gob\fR
+.TP
 .B "\-\-sync"
 Synchronous search for multi-staged filtering. If specified, fzf will launch
 the finder only after the input stream is complete and the initial filtering

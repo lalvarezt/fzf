@@ -56,7 +56,7 @@ func TestResultRank(t *testing.T) {
 
 	str := []rune("foo")
 	item1 := buildResult(
-		withIndex(&Item{text: util.RunesToChars(str)}, 1), []Offset{}, 2)
+		withIndex(&Item{text: util.RunesToChars(str)}, 1), []Offset{}, 2, nil)
 	if item1.points[3] != math.MaxUint16-2 || // Bonus
 		item1.points[2] != 3 || // Length
 		item1.points[1] != 0 || // Unused
@@ -65,7 +65,7 @@ func TestResultRank(t *testing.T) {
 		t.Error(item1)
 	}
 	// Only differ in index
-	item2 := buildResult(&Item{text: util.RunesToChars(str)}, []Offset{}, 2)
+	item2 := buildResult(&Item{text: util.RunesToChars(str)}, []Offset{}, 2, nil)
 
 	items := []Result{item1, item2}
 	sort.Sort(ByRelevance(items))
@@ -82,13 +82,13 @@ func TestResultRank(t *testing.T) {
 
 	// Sort by relevance
 	item3 := buildResult(
-		withIndex(&Item{}, 2), []Offset{{1, 3}, {5, 7}}, 3)
+		withIndex(&Item{}, 2), []Offset{{1, 3}, {5, 7}}, 3, nil)
 	item4 := buildResult(
-		withIndex(&Item{}, 2), []Offset{{1, 2}, {6, 7}}, 4)
+		withIndex(&Item{}, 2), []Offset{{1, 2}, {6, 7}}, 4, nil)
 	item5 := buildResult(
-		withIndex(&Item{}, 2), []Offset{{1, 3}, {5, 7}}, 5)
+		withIndex(&Item{}, 2), []Offset{{1, 3}, {5, 7}}, 5, nil)
 	item6 := buildResult(
-		withIndex(&Item{}, 2), []Offset{{1, 2}, {6, 7}}, 6)
+		withIndex(&Item{}, 2), []Offset{{1, 2}, {6, 7}}, 6, nil)
 	items = []Result{item1, item2, item3, item4, item5, item6}
 	sort.Sort(ByRelevance(items))
 	if !(items[0] == item6 && items[1] == item5 &&
@@ -104,7 +104,7 @@ func TestChunkTiebreak(t *testing.T) {
 
 	score := 100
 	test := func(input string, offset Offset, chunk string) {
-		item := buildResult(withIndex(&Item{text: util.RunesToChars([]rune(input))}, 1), []Offset{offset}, score)
+		item := buildResult(withIndex(&Item{text: util.RunesToChars([]rune(input))}, 1), []Offset{offset}, score, nil)
 		if !(item.points[3] == math.MaxUint16-uint16(score) && item.points[2] == uint16(len(chunk))) {
 			t.Error(item.points)
 		}
