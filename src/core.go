@@ -59,7 +59,7 @@ func Run(opts *Options) (int, error) {
 
 	// Frecency database
 	var frecencyDB *FrecencyDB
-	if opts.Frecency {
+	if opts.Frecency || opts.FrecencyDebug {
 		path := opts.FrecencyFile
 		if path == "" {
 			var err error
@@ -78,7 +78,12 @@ func Run(opts *Options) (int, error) {
 				fmt.Fprintf(os.Stderr, "Warning: could not load frecency database: %v\n", err)
 			}
 
-			// Save on exit
+			// If --frecency-debug, print and exit
+			if opts.FrecencyDebug {
+				return printFrecencyTable(frecencyDB)
+			}
+
+			// Save on exit (only for normal operation)
 			defer func() {
 				if frecencyDB != nil && frecencyDB.dirty {
 					if err := frecencyDB.Save(); err != nil {

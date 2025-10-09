@@ -230,6 +230,18 @@ the frecency data in a platform-specific cache directory:
 .br
 - Windows: \fB%LocalAppData%\\fzf\\frecency.gob\fR
 .TP
+.B "\-\-frecency\-debug"
+Print the frecency database contents and exit. Displays a table with score,
+frequency, last access time, and item for each entry in the database, sorted
+by score in descending order. Output format:
+.RS
+.nf
+SCORE       FREQUENCY   LAST_ACCESS           ITEM
+100.0       25          2025-01-15T10:30:00   /path/to/file
+50.0        50          2024-12-01T09:00:00   another-item
+.fi
+.RE
+.TP
 .B "\-\-sync"
 Synchronous search for multi-staged filtering. If specified, fzf will launch
 the finder only after the input stream is complete and the initial filtering

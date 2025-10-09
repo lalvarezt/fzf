@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -251,4 +252,58 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(destFile, sourceFile)
 	return err
+}
+
+// frecencyItem holds an item with its score for printing
+type frecencyItem struct {
+	item       string
+	score      float64
+	frequency  uint32
+	lastAccess time.Time
+}
+
+// printFrecencyTable prints the frecency database and returns exit code
+func printFrecencyTable(db *FrecencyDB) (int, error) {
+	if db == nil {
+		fmt.Println("No frecency data available")
+		return ExitOk, nil
+	}
+
+	// Copy entries with scores while holding lock
+	db.mutex.RLock()
+	items := make([]frecencyItem, 0, len(db.entries))
+	for item, entry := range db.entries {
+		items = append(items, frecencyItem{
+			item:       item,
+			score:      calculateScore(entry),
+			frequency:  entry.Frequency,
+			lastAccess: time.Unix(entry.LastAccess, 0),
+		})
+	}
+	db.mutex.RUnlock()
+
+	if len(items) == 0 {
+		fmt.Println("No frecency data available")
+		return ExitOk, nil
+	}
+
+	// Sort by score descending
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].score > items[j].score
+	})
+
+	// Print header
+	fmt.Printf("%-10s  %-10s  %-20s  %s\n", "SCORE", "FREQUENCY", "LAST_ACCESS", "ITEM")
+
+	// Print entries
+	for _, item := range items {
+		fmt.Printf("%-10.1f  %-10d  %-20s  %s\n",
+			item.score,
+			item.frequency,
+			item.lastAccess.Format("2006-01-02T15:04:05"),
+			item.item,
+		)
+	}
+
+	return ExitOk, nil
 }

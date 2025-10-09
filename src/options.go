@@ -58,6 +58,7 @@ Usage: fzf [options]
     --ansi                   Enable processing of ANSI color codes
     --frecency               Enable frecency-based sorting (frequency + recency)
     --frecency-file=PATH     Path to frecency database file
+    --frecency-debug         Print frecency database and exit
     --sync                   Synchronous search for multi-staged filtering
 
   GLOBAL STYLE
@@ -578,6 +579,7 @@ type Options struct {
 	Ansi              bool
 	Frecency          bool
 	FrecencyFile      string
+	FrecencyDebug     bool
 	Mouse             bool
 	BaseTheme         *tui.ColorTheme
 	Theme             *tui.ColorTheme
@@ -2765,6 +2767,8 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			if opts.FrecencyFile, err = nextString("file path required"); err != nil {
 				return err
 			}
+		case "--frecency-debug":
+			opts.FrecencyDebug = true
 		case "--no-mouse":
 			opts.Mouse = false
 		case "+c", "--no-color":
