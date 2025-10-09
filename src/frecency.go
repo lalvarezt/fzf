@@ -269,6 +269,9 @@ func printFrecencyTable(db *FrecencyDB) (int, error) {
 		return ExitOk, nil
 	}
 
+	// Print database path
+	fmt.Printf("Frecency database: %s\n\n", db.path)
+
 	// Copy entries with scores while holding lock
 	db.mutex.RLock()
 	items := make([]frecencyItem, 0, len(db.entries))
