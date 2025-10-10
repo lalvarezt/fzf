@@ -1869,6 +1869,12 @@ func parseActionList(masked string, original string, prevActions []*action, putA
 			appendAction(actExcludeMulti)
 		case "bg-cancel":
 			appendAction(actBgCancel)
+		case "frecency-entry-buff":
+			appendAction(actFrecencyEntryBuff)
+		case "frecency-entry-nerf":
+			appendAction(actFrecencyEntryNerf)
+		case "frecency-entry-remove":
+			appendAction(actFrecencyEntryRemove)
 		default:
 			t := isExecuteAction(specLower)
 			if t == actIgnore {

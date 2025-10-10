@@ -683,6 +683,9 @@ const (
 	actExclude
 	actExcludeMulti
 	actAsync
+	actFrecencyEntryBuff
+	actFrecencyEntryNerf
+	actFrecencyEntryRemove
 )
 
 func (a actionType) Name() string {
@@ -5745,6 +5748,33 @@ func (t *Terminal) Loop() error {
 				}
 			case actBell:
 				t.tui.Bell()
+			case actFrecencyEntryBuff:
+				if t.frecencyDB != nil {
+					if item := t.currentItem(); item != nil {
+						itemStr := item.AsString(t.ansi)
+						t.frecencyDB.Buff(itemStr)
+						t.frecencyDB.Save()
+						changed = true
+					}
+				}
+			case actFrecencyEntryNerf:
+				if t.frecencyDB != nil {
+					if item := t.currentItem(); item != nil {
+						itemStr := item.AsString(t.ansi)
+						t.frecencyDB.Nerf(itemStr)
+						t.frecencyDB.Save()
+						changed = true
+					}
+				}
+			case actFrecencyEntryRemove:
+				if t.frecencyDB != nil {
+					if item := t.currentItem(); item != nil {
+						itemStr := item.AsString(t.ansi)
+						t.frecencyDB.Remove(itemStr)
+						t.frecencyDB.Save()
+						changed = true
+					}
+				}
 			case actExcludeMulti:
 				if len(t.selected) > 0 {
 					for _, item := range t.sortSelected() {

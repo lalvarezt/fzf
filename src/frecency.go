@@ -39,11 +39,13 @@ const (
 
 // Frecency scaling factor for logarithmic transformation to uint16 range
 // Calculation: maxUint16 / log₁₀(maxRealisticScore + 1)
-//   maxRealisticScore ≈ 1,000,000 (extreme power user: 100k freq × 4.0 weight)
-//   log₁₀(1,000,001) ≈ 6.0
-//   65,535 / 6.0 = 10,922.5
+//
+//	maxRealisticScore ≈ 1,000,000 (extreme power user: 100k freq × 4.0 weight)
+//	log₁₀(1,000,001) ≈ 6.0
+//	65,535 / 6.0 = 10,922.5
+//
 // Maps score range [0.25, 1M] → [0, 65535] for direct uint16 use
-const frecencyScaleFactor =  10922.5
+const frecencyScaleFactor = 10922.5
 
 // NewFrecencyDB creates a new frecency database
 // If customPath is empty, uses the default platform-specific path
@@ -123,7 +125,15 @@ func (db *FrecencyDB) Load() error {
 
 // Save writes the frecency database to disk atomically
 // Uses temp file + rename to ensure atomicity
+// Returns nil without doing anything if the database is not dirty
 func (db *FrecencyDB) Save() error {
+	db.mutex.Lock()
+	if !db.dirty {
+		db.mutex.Unlock()
+		return nil
+	}
+	db.mutex.Unlock()
+
 	// Create parent directory if it doesn't exist
 	dir := filepath.Dir(db.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -234,6 +244,80 @@ func (db *FrecencyDB) Update(item string) {
 	db.scores[item] = db.calculateScore(entry)
 	db.dirty = true
 	db.mutex.Unlock()
+}
+
+// Buff increments the frequency counter for an item
+// Creates a new entry if the item doesn't exist
+func (db *FrecencyDB) Buff(item string) {
+	now := time.Now().Unix()
+
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	entry, exists := db.entries[item]
+	if exists {
+		// Increment frequency with overflow check
+		if entry.Frequency < math.MaxUint32 {
+			entry.Frequency++
+		}
+	} else {
+		// Create new entry
+		entry = &FrecencyEntry{
+			Frequency:   1,
+			FirstAccess: now,
+			LastAccess:  now,
+		}
+		db.entries[item] = entry
+	}
+
+	// Recalculate score for this item
+	db.scores[item] = db.calculateScore(entry)
+	db.dirty = true
+}
+
+// Nerf decrements the frequency counter for an item
+// Removes the entry if frequency reaches 0
+// Does nothing if the item doesn't exist
+func (db *FrecencyDB) Nerf(item string) {
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	entry, exists := db.entries[item]
+	if !exists {
+		return
+	}
+
+	// Decrement frequency
+	if entry.Frequency > 0 {
+		entry.Frequency--
+	}
+
+	// Remove entry if frequency reaches 0
+	if entry.Frequency == 0 {
+		delete(db.entries, item)
+		delete(db.scores, item)
+	} else {
+		// Recalculate score for this item
+		db.scores[item] = db.calculateScore(entry)
+	}
+
+	db.dirty = true
+}
+
+// Remove deletes an entry from the frecency database
+// Does nothing if the item doesn't exist
+func (db *FrecencyDB) Remove(item string) {
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	_, exists := db.entries[item]
+	if !exists {
+		return
+	}
+
+	delete(db.entries, item)
+	delete(db.scores, item)
+	db.dirty = true
 }
 
 // copyFile copies a file from src to dst
