@@ -22,7 +22,7 @@ type FrecencyEntry struct {
 // FrecencyDB manages the frecency database
 type FrecencyDB struct {
 	entries map[string]*FrecencyEntry
-	scores  map[string]float64
+	scores  sync.Map
 	path    string
 	mutex   sync.RWMutex
 	dirty   bool
@@ -62,7 +62,7 @@ func NewFrecencyDB(customPath string) *FrecencyDB {
 
 	return &FrecencyDB{
 		entries: make(map[string]*FrecencyEntry),
-		scores:  make(map[string]float64),
+		scores:  sync.Map{},
 		path:    path,
 		dirty:   false,
 	}
@@ -114,9 +114,9 @@ func (db *FrecencyDB) Load() error {
 	db.dirty = false
 
 	// Calculate all scores after loading entries
-	db.scores = make(map[string]float64, len(db.entries))
+	db.scores = sync.Map{}
 	for item, entry := range db.entries {
-		db.scores[item] = db.calculateScore(entry)
+		db.scores.Store(item, db.calculateScore(entry))
 	}
 
 	db.mutex.Unlock()
@@ -209,9 +209,10 @@ func (db *FrecencyDB) calculateScore(entry *FrecencyEntry) float64 {
 // Returns a value in [0, 65535] range ready for uint16 casting in sort criteria
 // Returns 0.0 if the item has never been selected
 func (db *FrecencyDB) GetScore(item string) float64 {
-	db.mutex.RLock()
-	rawScore := db.scores[item]
-	db.mutex.RUnlock()
+	rawScore := 0.0
+	if value, ok := db.scores.Load(item); ok {
+		rawScore = value.(float64)
+	}
 
 	// Apply logarithmic scaling to handle wide dynamic range
 	// +1 handles zero/small values, log₁₀ compresses large values
@@ -241,7 +242,7 @@ func (db *FrecencyDB) Update(item string) {
 		db.entries[item] = entry
 	}
 	// Recalculate score for this item
-	db.scores[item] = db.calculateScore(entry)
+	db.scores.Store(item, db.calculateScore(entry))
 	db.dirty = true
 	db.mutex.Unlock()
 }
@@ -271,7 +272,7 @@ func (db *FrecencyDB) Buff(item string) {
 	}
 
 	// Recalculate score for this item
-	db.scores[item] = db.calculateScore(entry)
+	db.scores.Store(item, db.calculateScore(entry))
 	db.dirty = true
 }
 
@@ -295,10 +296,10 @@ func (db *FrecencyDB) Nerf(item string) {
 	// Remove entry if frequency reaches 0
 	if entry.Frequency == 0 {
 		delete(db.entries, item)
-		delete(db.scores, item)
+		db.scores.Delete(item)
 	} else {
 		// Recalculate score for this item
-		db.scores[item] = db.calculateScore(entry)
+		db.scores.Store(item, db.calculateScore(entry))
 	}
 
 	db.dirty = true
@@ -316,7 +317,7 @@ func (db *FrecencyDB) Remove(item string) {
 	}
 
 	delete(db.entries, item)
-	delete(db.scores, item)
+	db.scores.Delete(item)
 	db.dirty = true
 }
 
@@ -360,9 +361,13 @@ func printFrecencyTable(db *FrecencyDB) (int, error) {
 	db.mutex.RLock()
 	items := make([]frecencyItem, 0, len(db.entries))
 	for item, entry := range db.entries {
+		score := 0.0
+		if value, ok := db.scores.Load(item); ok {
+			score = value.(float64)
+		}
 		items = append(items, frecencyItem{
 			item:       item,
-			score:      db.scores[item],
+			score:      score,
 			frequency:  entry.Frequency,
 			lastAccess: time.Unix(entry.LastAccess, 0),
 		})
