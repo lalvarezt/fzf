@@ -106,12 +106,9 @@ func buildResult(item *Item, offsets []Offset, score int, frecencyDB *FrecencyDB
 			}
 		case byFrecency:
 			if frecencyDB != nil {
-				// Get frecency score for this item
+				// Higher is better
 				frecencyScore := frecencyDB.GetScore(item.text.ToString())
-				// Scale and invert: higher frecency = lower value (better rank)
-				// Frecency scores typically range from 0-100+, scale to uint16
-				scaledScore := uint16(math.Min(frecencyScore*100, math.MaxUint16))
-				val = math.MaxUint16 - scaledScore
+				val = math.MaxUint16 - uint16(frecencyScore)
 			}
 		}
 		result.points[3-idx] = val

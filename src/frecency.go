@@ -22,6 +22,7 @@ type FrecencyEntry struct {
 // FrecencyDB manages the frecency database
 type FrecencyDB struct {
 	entries map[string]*FrecencyEntry
+	scores  map[string]float64
 	path    string
 	mutex   sync.RWMutex
 	dirty   bool
@@ -29,20 +30,20 @@ type FrecencyDB struct {
 
 // Time constants for time bucket calculation
 const (
-	secondsPerHour  = 60 * 60
-	secondsPerDay   = 24 * secondsPerHour
-	secondsPerWeek  = 7 * secondsPerDay
-	secondsPerMonth = 30 * secondsPerDay
+	SECOND = 1
+	MINUTE = 60 * SECOND
+	HOUR   = 60 * MINUTE
+	DAY    = 24 * HOUR
+	WEEK   = 7 * DAY
 )
 
-// Time weight multipliers for different age buckets
-const (
-	weightVeryRecent = 4.0  // < 1 hour
-	weightRecent     = 2.0  // < 1 day
-	weightModerate   = 1.0  // < 1 week
-	weightOld        = 0.5  // < 1 month
-	weightVeryOld    = 0.25 // older than 1 month
-)
+// Frecency scaling factor for logarithmic transformation to uint16 range
+// Calculation: maxUint16 / log₁₀(maxRealisticScore + 1)
+//   maxRealisticScore ≈ 1,000,000 (extreme power user: 100k freq × 4.0 weight)
+//   log₁₀(1,000,001) ≈ 6.0
+//   65,535 / 6.0 = 10,922.5
+// Maps score range [0.25, 1M] → [0, 65535] for direct uint16 use
+const frecencyScaleFactor =  10922.5
 
 // NewFrecencyDB creates a new frecency database
 // If customPath is empty, uses the default platform-specific path
@@ -59,6 +60,7 @@ func NewFrecencyDB(customPath string) *FrecencyDB {
 
 	return &FrecencyDB{
 		entries: make(map[string]*FrecencyEntry),
+		scores:  make(map[string]float64),
 		path:    path,
 		dirty:   false,
 	}
@@ -108,6 +110,13 @@ func (db *FrecencyDB) Load() error {
 	db.mutex.Lock()
 	db.entries = entries
 	db.dirty = false
+
+	// Calculate all scores after loading entries
+	db.scores = make(map[string]float64, len(db.entries))
+	for item, entry := range db.entries {
+		db.scores[item] = db.calculateScore(entry)
+	}
+
 	db.mutex.Unlock()
 	return nil
 }
@@ -165,21 +174,38 @@ func (db *FrecencyDB) Save() error {
 	return nil
 }
 
-// GetScore calculates the frecency score for an item
+// calculateScore computes the frecency score for a single entry
+func (db *FrecencyDB) calculateScore(entry *FrecencyEntry) float64 {
+	frequency := float64(entry.Frequency)
+	lastAccess := entry.LastAccess
+	duration := max(time.Now().Unix()-lastAccess, 0)
+
+	// Time buckets (zoxide-like algorithm)
+	var timeWeight float64
+	if duration < HOUR {
+		timeWeight = 4.0
+	} else if duration < DAY {
+		timeWeight = 2.0
+	} else if duration < WEEK {
+		timeWeight = 0.5
+	} else {
+		timeWeight = 0.25
+	}
+
+	return frequency * timeWeight
+}
+
+// GetScore returns the pre-calculated and scaled frecency score for an item
+// Returns a value in [0, 65535] range ready for uint16 casting in sort criteria
 // Returns 0.0 if the item has never been selected
 func (db *FrecencyDB) GetScore(item string) float64 {
 	db.mutex.RLock()
-	entry, exists := db.entries[item]
-	if !exists {
-		db.mutex.RUnlock()
-		return 0.0
-	}
-	frequency := entry.Frequency
-	lastAccess := entry.LastAccess
+	rawScore := db.scores[item]
 	db.mutex.RUnlock()
 
-	timeWeight := getTimeWeight(lastAccess)
-	return float64(frequency) * timeWeight
+	// Apply logarithmic scaling to handle wide dynamic range
+	// +1 handles zero/small values, log₁₀ compresses large values
+	return math.Min(math.Log10(rawScore+1)*frecencyScaleFactor, 65535)
 }
 
 // Update increments the frequency counter and updates the timestamp for an item
@@ -191,49 +217,23 @@ func (db *FrecencyDB) Update(item string) {
 	entry, exists := db.entries[item]
 	if exists {
 		// Update existing entry
-		// Use saturating addition to prevent overflow
 		if entry.Frequency < math.MaxUint32 {
 			entry.Frequency++
 		}
 		entry.LastAccess = now
 	} else {
 		// Create new entry
-		db.entries[item] = &FrecencyEntry{
+		entry = &FrecencyEntry{
 			Frequency:   1,
 			FirstAccess: now,
 			LastAccess:  now,
 		}
+		db.entries[item] = entry
 	}
+	// Recalculate score for this item
+	db.scores[item] = db.calculateScore(entry)
 	db.dirty = true
 	db.mutex.Unlock()
-}
-
-// calculateScore computes the frecency score using frequency and time weight
-func calculateScore(entry *FrecencyEntry) float64 {
-	timeWeight := getTimeWeight(entry.LastAccess)
-	return float64(entry.Frequency) * timeWeight
-}
-
-// getTimeWeight returns a time-based multiplier based on how recently the item was accessed
-func getTimeWeight(lastAccess int64) float64 {
-	now := time.Now().Unix()
-	ageSeconds := now - lastAccess
-
-	// Handle clock skew (future timestamps)
-	ageSeconds = max(ageSeconds, 0)
-
-	switch {
-	case ageSeconds < secondsPerHour:
-		return weightVeryRecent
-	case ageSeconds < secondsPerDay:
-		return weightRecent
-	case ageSeconds < secondsPerWeek:
-		return weightModerate
-	case ageSeconds < secondsPerMonth:
-		return weightOld
-	default:
-		return weightVeryOld
-	}
 }
 
 // copyFile copies a file from src to dst
@@ -272,13 +272,13 @@ func printFrecencyTable(db *FrecencyDB) (int, error) {
 	// Print database path
 	fmt.Printf("Frecency database: %s\n\n", db.path)
 
-	// Copy entries with scores while holding lock
+	// Copy entries with scores
 	db.mutex.RLock()
 	items := make([]frecencyItem, 0, len(db.entries))
 	for item, entry := range db.entries {
 		items = append(items, frecencyItem{
 			item:       item,
-			score:      calculateScore(entry),
+			score:      db.scores[item],
 			frequency:  entry.Frequency,
 			lastAccess: time.Unix(entry.LastAccess, 0),
 		})
