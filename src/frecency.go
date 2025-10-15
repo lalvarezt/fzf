@@ -17,6 +17,7 @@ type FrecencyEntry struct {
 	Frequency   uint32 // Number of times this item was selected
 	LastAccess  int64  // Unix timestamp of last selection
 	FirstAccess int64  // Unix timestamp of first selection
+	PrevAccess  int64  // Unix timestamp of previous selection
 }
 
 // FrecencyDB manages the frecency database
@@ -45,7 +46,13 @@ const (
 //	65,535 / 6.0 = 10,922.5
 //
 // Maps score range [0.25, 1M] → [0, 65535] for direct uint16 use
-const frecencyScaleFactor = 10922.5
+// Half-life and momentum constants tune the continuous decay and burst boost.
+const (
+	frecencyScaleFactor = 10922.5
+	frecencyHalfLife    = 24 * time.Hour
+	momentumWindow      = 6 * time.Hour
+	momentumMaxBoost    = 0.5
+)
 
 // NewFrecencyDB creates a new frecency database
 // If customPath is empty, uses the default platform-specific path
@@ -186,32 +193,68 @@ func (db *FrecencyDB) Save() error {
 
 // calculateScore computes the frecency score for a single entry
 func (db *FrecencyDB) calculateScore(entry *FrecencyEntry) float64 {
-	frequency := float64(entry.Frequency)
-	lastAccess := entry.LastAccess
-	duration := max(time.Now().Unix()-lastAccess, 0)
+	score, _, _, _ := db.scoreComponents(entry, time.Now())
+	return score
+}
 
-	// Time buckets (zoxide-like algorithm)
-	var timeWeight float64
-	if duration < HOUR {
-		timeWeight = 4.0
-	} else if duration < DAY {
-		timeWeight = 2.0
-	} else if duration < WEEK {
-		timeWeight = 0.5
-	} else {
-		timeWeight = 0.25
+func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw, freqComponent, decayComponent, momentumComponent float64) {
+	if entry == nil || entry.Frequency == 0 || entry.LastAccess == 0 {
+		return 0, 0, 0, 0
 	}
 
-	return frequency * timeWeight
+	freqComponent = math.Log2(float64(entry.Frequency) + 1.0)
+
+	last := time.Unix(entry.LastAccess, 0)
+	duration := now.Sub(last)
+	if duration < 0 {
+		duration = 0
+	}
+	halfLifeSeconds := frecencyHalfLife.Seconds()
+	if halfLifeSeconds <= 0 {
+		halfLifeSeconds = 1
+	}
+	decayComponent = math.Exp(math.Log(0.5) * duration.Seconds() / halfLifeSeconds)
+
+	momentumComponent = 1.0
+	if entry.PrevAccess > 0 {
+		prev := time.Unix(entry.PrevAccess, 0)
+		delta := last.Sub(prev)
+		if delta < 0 {
+			delta = 0
+		}
+		if delta < momentumWindow {
+			window := momentumWindow.Seconds()
+			if window <= 0 {
+				window = 1
+			}
+			gapRatio := delta.Seconds() / window
+			momentumComponent += momentumMaxBoost * (1.0 - gapRatio)
+		}
+	}
+
+	raw = freqComponent * decayComponent * momentumComponent
+	return raw, freqComponent, decayComponent, momentumComponent
 }
 
 // GetScore returns the pre-calculated and scaled frecency score for an item
 // Returns a value in [0, 65535] range ready for uint16 casting in sort criteria
 // Returns 0.0 if the item has never been selected
 func (db *FrecencyDB) GetScore(item string) float64 {
-	rawScore := 0.0
-	if value, ok := db.scores.Load(item); ok {
-		rawScore = value.(float64)
+	var (
+		rawScore float64
+		exists   bool
+	)
+
+	db.mutex.RLock()
+	entry, ok := db.entries[item]
+	if ok {
+		rawScore, _, _, _ = db.scoreComponents(entry, time.Now())
+		exists = true
+	}
+	db.mutex.RUnlock()
+
+	if exists {
+		db.scores.Store(item, rawScore)
 	}
 
 	// Apply logarithmic scaling to handle wide dynamic range
@@ -231,6 +274,9 @@ func (db *FrecencyDB) Update(item string) {
 		if entry.Frequency < math.MaxUint32 {
 			entry.Frequency++
 		}
+		if entry.LastAccess > 0 {
+			entry.PrevAccess = entry.LastAccess
+		}
 		entry.LastAccess = now
 	} else {
 		// Create new entry
@@ -238,6 +284,7 @@ func (db *FrecencyDB) Update(item string) {
 			Frequency:   1,
 			FirstAccess: now,
 			LastAccess:  now,
+			PrevAccess:  now,
 		}
 		db.entries[item] = entry
 	}
@@ -267,6 +314,7 @@ func (db *FrecencyDB) Buff(item string) {
 			Frequency:   1,
 			FirstAccess: now,
 			LastAccess:  now,
+			PrevAccess:  now,
 		}
 		db.entries[item] = entry
 	}
@@ -342,9 +390,37 @@ func copyFile(src, dst string) error {
 // frecencyItem holds an item with its score for printing
 type frecencyItem struct {
 	item       string
-	score      float64
+	rawScore   float64
+	scaled     float64
 	frequency  uint32
 	lastAccess time.Time
+	prevAccess time.Time
+	age        time.Duration
+	decay      float64
+	momentum   float64
+	freqScore  float64
+}
+
+func formatShortDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "<1m"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	if d < 7*24*time.Hour {
+		return fmt.Sprintf("%dd", int(d.Hours()/(24)))
+	}
+	if d < 30*24*time.Hour {
+		return fmt.Sprintf("%dw", int(d.Hours()/(24*7)))
+	}
+	if d < 365*24*time.Hour {
+		return fmt.Sprintf("%dmo", int(d.Hours()/(24*30)))
+	}
+	return fmt.Sprintf("%dyr", int(d.Hours()/(24*365)))
 }
 
 // printFrecencyTable prints the frecency database and returns exit code
@@ -360,16 +436,31 @@ func printFrecencyTable(db *FrecencyDB) (int, error) {
 	// Copy entries with scores
 	db.mutex.RLock()
 	items := make([]frecencyItem, 0, len(db.entries))
+	now := time.Now()
 	for item, entry := range db.entries {
-		score := 0.0
-		if value, ok := db.scores.Load(item); ok {
-			score = value.(float64)
+		rawScore, freqComponent, decayComponent, momentumComponent := db.scoreComponents(entry, now)
+		scaled := math.Min(math.Log10(rawScore+1)*frecencyScaleFactor, 65535)
+		last := time.Unix(entry.LastAccess, 0)
+		age := now.Sub(last)
+		if age < 0 {
+			age = 0
 		}
+		var prev time.Time
+		if entry.PrevAccess > 0 {
+			prev = time.Unix(entry.PrevAccess, 0)
+		}
+
 		items = append(items, frecencyItem{
 			item:       item,
-			score:      score,
+			rawScore:   rawScore,
+			scaled:     scaled,
 			frequency:  entry.Frequency,
-			lastAccess: time.Unix(entry.LastAccess, 0),
+			lastAccess: last,
+			prevAccess: prev,
+			age:        age,
+			decay:      decayComponent,
+			momentum:   momentumComponent,
+			freqScore:  freqComponent,
 		})
 	}
 	db.mutex.RUnlock()
@@ -381,18 +472,22 @@ func printFrecencyTable(db *FrecencyDB) (int, error) {
 
 	// Sort by score descending
 	sort.Slice(items, func(i, j int) bool {
-		return items[i].score > items[j].score
+		return items[i].rawScore > items[j].rawScore
 	})
 
 	// Print header
-	fmt.Printf("%-10s  %-10s  %-20s  %s\n", "SCORE", "FREQUENCY", "LAST_ACCESS", "ITEM")
+	fmt.Printf("%-10s  %-6s  %-16s  %-6s  %-7s  %-9s  %-10s  %s\n", "RAW", "FREQ", "LAST_ACCESS", "AGE", "DECAY", "MOMENTUM", "SCALED", "ITEM")
 
 	// Print entries
 	for _, item := range items {
-		fmt.Printf("%-10.1f  %-10d  %-20s  %s\n",
-			item.score,
+		fmt.Printf("%-10.2f  %-6d  %-16s  %-6s  %-7.3f  %-9.3f  %-10.0f  %s\n",
+			item.rawScore,
 			item.frequency,
-			item.lastAccess.Format("2006-01-02T15:04:05"),
+			item.lastAccess.Format("2006-01-02 15:04"),
+			formatShortDuration(item.age),
+			item.decay,
+			item.momentum,
+			item.scaled,
 			item.item,
 		)
 	}
