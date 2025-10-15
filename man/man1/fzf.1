@@ -215,10 +215,31 @@ Print output delimited by ASCII NUL characters instead of newline characters
 Enable processing of ANSI color codes
 .TP
 .B "\-\-frecency"
-Enable frecency-based sorting that combines frequency (how often items are
-selected) and recency (when they were last selected). When enabled, frecency
-scoring is automatically prepended to the sort criteria, prioritizing items
-you use most frequently and most recently.
+Enable frecency-based sorting that combines long-term familiarity with recent
+activity. Each time you accept an item, fzf updates its record and recomputes a
+continuous score that is prepended to the sort criteria. The raw score is
+calculated as:
+.RS
+.nf
+log\~\_2(frequency + 1) × 0.5^(age / 24h) × momentum
+momentum = 1 + 0.5 × (1 - clamp(gap / 6h, 0, 1))
+.fi
+.RE
+where:
+.RS
+.IP \[bu] 2
+\fIfrequency\fR is the total number of selections for the item, compressed with
+log\~\_2 so heavily used entries stay ahead without overwhelming the list.
+.IP \[bu] 2
+\fIage\fR is the time since the last selection. Every 24 hours halves the score,
+so stale entries fade smoothly.
+.IP \[bu] 2
+\fIgap\fR is the time between the two most recent selections. Picking the same
+item again within six hours grants up to a 50% momentum boost (items selected
+only once have a momentum factor of 1.0).
+.RE
+The raw value is then scaled into the 0–65535 range with \fBlog\~\_10(raw + 1) ×
+10,922.5\fR so it can participate in the standard sorting pipeline.
 .TP
 .BI "\-\-frecency\-file=" "PATH"
 Specify a custom path for the frecency database file. By default, fzf stores
@@ -231,14 +252,14 @@ the frecency data in a platform-specific cache directory:
 - Windows: \fB%LocalAppData%\\fzf\\frecency.gob\fR
 .TP
 .B "\-\-frecency\-debug"
-Print the frecency database contents and exit. Displays a table with score,
-frequency, last access time, and item for each entry in the database, sorted
-by score in descending order. Output format:
+Print the frecency database contents and exit. Displays a table with raw score,
+frequency, last access time, age, decay, momentum, scaled score, and item for
+each entry in the database, sorted by score in descending order. Output format:
 .RS
 .nf
-SCORE       FREQUENCY   LAST_ACCESS           ITEM
-100.0       25          2025-01-15T10:30:00   /path/to/file
-50.0        50          2024-12-01T09:00:00   another-item
+RAW         FREQ    LAST_ACCESS       AGE     DECAY    MOMENTUM   SCALED      ITEM
+2.34        2       2025-10-15 11:00  5m      0.998    1.479      5494        ~/src/project/README.md
+1.00        1       2025-10-15 10:50  15m     0.990    1.000      3471        ~/src/project/docs/spec.md
 .fi
 .RE
 .TP

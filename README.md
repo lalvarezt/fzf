@@ -91,6 +91,7 @@ Table of Contents
 * [Vim plugin](#vim-plugin)
 * [Advanced topics](#advanced-topics)
     * [Customizing for different types of input](#customizing-for-different-types-of-input)
+    * [Frecency-based sorting](#frecency-based-sorting)
     * [Performance](#performance)
     * [Executing external programs](#executing-external-programs)
     * [Turning into a different process](#turning-into-a-different-process)
@@ -748,6 +749,61 @@ easier, fzf provides a set of "scheme"s for some common input types.
 | `--scheme=history` | Suitable for command history or any input where chronological ordering is important |
 
 (See `fzf --man` for the details)
+
+### Frecency-based sorting
+
+`fzf --frecency` maintains a lightweight database of the items you pick so the
+next search can prefer familiar and freshly used entries. The database is a
+`gob` file stored under `~/.cache/fzf/frecency.gob` by default (override with
+`--frecency-file`). Each selection updates the record in-memory and the file is
+rewritten when fzf exits.
+
+The score used for ordering is the product of three factors:
+
+```
+raw = log₂(frequency + 1) × 0.5^(age / 24h) × momentum
+momentum = 1 + 0.5 × (1 - clamp(gap / 6h, 0, 1))
+```
+
+- `frequency` is the total number of selections for the item. Using `log₂`
+  keeps ultra-popular entries strong without letting them dominate everything.
+- `age` is the time since the most recent selection. Each additional 24 hours
+  halves the contribution of the item, so one week of inactivity reduces the
+  score by about 1/128.
+- `gap` is the time between the last two selections. Opening the same target
+  again within six hours applies up to a 50 % momentum boost; the effect fades
+  linearly to zero as the gap approaches the six-hour window.
+  When an item has only been chosen once, the momentum factor stays at 1.0.
+
+The raw score is converted to a 0–65535 range with
+`log₁₀(raw + 1) × 10922.5` so it fits into the existing sort machinery. You
+can inspect the database with `fzf --frecency-debug`, which prints:
+
+```
+RAW         FREQ    LAST_ACCESS       AGE     DECAY    MOMENTUM   SCALED      ITEM
+2.34        2       2025-10-15 11:00  5m      0.998    1.479      5494        ~/src/project/README.md
+1.00        1       2025-10-15 10:50  15m     0.990    1.000      3471        ~/src/project/docs/spec.md
+0.21        20      2025-10-12 09:00  3d      0.089    1.000      940         ~/.config/nvim/init.lua
+```
+
+- `RAW` is the score before scaling.
+- `FREQ` is the counter used in the logarithmic component.
+- `AGE` and `DECAY` show how the exponential half-life suppresses stale items.
+- `MOMENTUM` highlights recent bursts of activity.
+- `SCALED` is the value actually compared during sorting.
+
+**Examples**
+
+| Scenario                       | Calculation                                                                 | Raw score |
+| ------------------------------ | ---------------------------------------------------------------------------- | --------- |
+| Single fresh selection        | `log₂(1 + 1) × 0.5^(10 min / 24 h) × 1.0 = 1.00`                             | 1.00      |
+| Daily favorite (20 uses)      | `log₂(20 + 1) × 0.5^(20 h / 24 h) × 1.0 ≈ 2.47`                             | 2.47      |
+| Quick follow-up (2 picks, 15m)| `log₂(2 + 1) × 0.5^(5 min / 24 h) × (1 + 0.5 × (1 - 0.25/6)) ≈ 2.34`       | 2.34      |
+
+These numbers make it easy to reason about how a frequently opened file that
+sat idle for a day competes with something touched only once a few minutes ago:
+the decayed daily favorite still outranks the single-hit entry, while back-to-
+back picks claim the top spot thanks to the momentum boost.
 
 ### Performance
 
