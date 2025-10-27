@@ -22,21 +22,13 @@ type FrecencyEntry struct {
 
 // FrecencyDB manages the frecency database
 type FrecencyDB struct {
-	entries map[string]*FrecencyEntry
-	scores  sync.Map
-	path    string
-	mutex   sync.RWMutex
-	dirty   bool
+	entries     map[string]*FrecencyEntry
+	scores      sync.Map  // Cached scaled scores for fast lookup
+	sessionTime time.Time // Frozen time at startup for consistent relative ordering during session
+	path        string
+	mutex       sync.RWMutex
+	dirty       bool
 }
-
-// Time constants for time bucket calculation
-const (
-	SECOND = 1
-	MINUTE = 60 * SECOND
-	HOUR   = 60 * MINUTE
-	DAY    = 24 * HOUR
-	WEEK   = 7 * DAY
-)
 
 // Frecency scaling factor for logarithmic transformation to uint16 range
 // Calculation: maxUint16 / log₁₀(maxRealisticScore + 1)
@@ -52,6 +44,7 @@ const (
 	frecencyHalfLife    = 24 * time.Hour
 	momentumWindow      = 6 * time.Hour
 	momentumMaxBoost    = 0.5
+	logHalf             = -0.6931471805599453 // math.Log(0.5)
 )
 
 // NewFrecencyDB creates a new frecency database
@@ -68,10 +61,11 @@ func NewFrecencyDB(customPath string) *FrecencyDB {
 	}
 
 	return &FrecencyDB{
-		entries: make(map[string]*FrecencyEntry),
-		scores:  sync.Map{},
-		path:    path,
-		dirty:   false,
+		entries:     make(map[string]*FrecencyEntry),
+		scores:      sync.Map{},
+		sessionTime: time.Now(),
+		path:        path,
+		dirty:       false,
 	}
 }
 
@@ -118,12 +112,13 @@ func (db *FrecencyDB) Load() error {
 
 	db.mutex.Lock()
 	db.entries = entries
+	db.sessionTime = time.Now()
 	db.dirty = false
 
-	// Calculate all scores after loading entries
+	// Calculate all scores after loading entries using frozen sessionTime
 	db.scores = sync.Map{}
 	for item, entry := range db.entries {
-		db.scores.Store(item, db.calculateScore(entry))
+		db.calculateAndStoreScore(item, entry)
 	}
 
 	db.mutex.Unlock()
@@ -191,10 +186,12 @@ func (db *FrecencyDB) Save() error {
 	return nil
 }
 
-// calculateScore computes the frecency score for a single entry
-func (db *FrecencyDB) calculateScore(entry *FrecencyEntry) float64 {
-	score, _, _, _ := db.scoreComponents(entry, time.Now())
-	return score
+// calculateAndStoreScore computes and stores the scaled frecency score for an item
+// Uses frozen sessionTime for consistent ordering during the session
+func (db *FrecencyDB) calculateAndStoreScore(item string, entry *FrecencyEntry) {
+	rawScore, _, _, _ := db.scoreComponents(entry, db.sessionTime)
+	scaledScore := math.Min(math.Log10(rawScore+1)*frecencyScaleFactor, 65535)
+	db.scores.Store(item, scaledScore)
 }
 
 func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw, freqComponent, decayComponent, momentumComponent float64) {
@@ -213,7 +210,7 @@ func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw,
 	if halfLifeSeconds <= 0 {
 		halfLifeSeconds = 1
 	}
-	decayComponent = math.Exp(math.Log(0.5) * duration.Seconds() / halfLifeSeconds)
+	decayComponent = math.Exp(logHalf * duration.Seconds() / halfLifeSeconds)
 
 	momentumComponent = 1.0
 	if entry.PrevAccess > 0 {
@@ -240,26 +237,10 @@ func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw,
 // Returns a value in [0, 65535] range ready for uint16 casting in sort criteria
 // Returns 0.0 if the item has never been selected
 func (db *FrecencyDB) GetScore(item string) float64 {
-	var (
-		rawScore float64
-		exists   bool
-	)
-
-	db.mutex.RLock()
-	entry, ok := db.entries[item]
-	if ok {
-		rawScore, _, _, _ = db.scoreComponents(entry, time.Now())
-		exists = true
+	if score, ok := db.scores.Load(item); ok {
+		return score.(float64)
 	}
-	db.mutex.RUnlock()
-
-	if exists {
-		db.scores.Store(item, rawScore)
-	}
-
-	// Apply logarithmic scaling to handle wide dynamic range
-	// +1 handles zero/small values, log₁₀ compresses large values
-	return math.Min(math.Log10(rawScore+1)*frecencyScaleFactor, 65535)
+	return 0.0
 }
 
 // Update increments the frequency counter and updates the timestamp for an item
@@ -268,6 +249,8 @@ func (db *FrecencyDB) Update(item string) {
 	now := time.Now().Unix()
 
 	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
 	entry, exists := db.entries[item]
 	if exists {
 		// Update existing entry
@@ -288,10 +271,9 @@ func (db *FrecencyDB) Update(item string) {
 		}
 		db.entries[item] = entry
 	}
-	// Recalculate score for this item
-	db.scores.Store(item, db.calculateScore(entry))
+	// Recalculate score for this item using frozen sessionTime
+	db.calculateAndStoreScore(item, entry)
 	db.dirty = true
-	db.mutex.Unlock()
 }
 
 // Buff increments the frequency counter for an item
@@ -319,8 +301,8 @@ func (db *FrecencyDB) Buff(item string) {
 		db.entries[item] = entry
 	}
 
-	// Recalculate score for this item
-	db.scores.Store(item, db.calculateScore(entry))
+	// Recalculate score for this item using frozen sessionTime
+	db.calculateAndStoreScore(item, entry)
 	db.dirty = true
 }
 
@@ -346,8 +328,8 @@ func (db *FrecencyDB) Nerf(item string) {
 		delete(db.entries, item)
 		db.scores.Delete(item)
 	} else {
-		// Recalculate score for this item
-		db.scores.Store(item, db.calculateScore(entry))
+		// Recalculate score for this item using frozen sessionTime
+		db.calculateAndStoreScore(item, entry)
 	}
 
 	db.dirty = true
@@ -434,6 +416,7 @@ func printFrecencyTable(db *FrecencyDB) (int, error) {
 	fmt.Printf("Frecency database: %s\n\n", db.path)
 
 	// Copy entries with scores
+	// Note: Uses time.Now() instead of sessionTime to show current decay state for debugging
 	db.mutex.RLock()
 	items := make([]frecencyItem, 0, len(db.entries))
 	now := time.Now()
