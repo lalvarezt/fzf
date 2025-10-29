@@ -50,7 +50,9 @@ Usage: fzf [options]
     --disabled               Do not perform search
     --tiebreak=CRI[,..]      Comma-separated list of sort criteria to apply
                              when the scores are tied
-                             [length|chunk|pathname|begin|end|index] (default: length)
+                             [score|length|chunk|pathname|frecency|begin|end|index]
+                             (default: length)
+                             (If first criterion is frecency, score is not auto-prepended)
 
   INPUT/OUTPUT
     --read0                  Read input delimited by ASCII NUL characters
@@ -1266,7 +1268,18 @@ func parseScheme(str string) (string, []criterion, error) {
 }
 
 func parseTiebreak(str string) ([]criterion, error) {
-	criteria := []criterion{byScore}
+	parts := strings.Split(strings.ToLower(str), ",")
+
+	// Check if first criterion is "frecency" - skip auto-score
+	skipAutoScore := len(parts) > 0 && parts[0] == "frecency"
+
+	criteria := []criterion{}
+	if !skipAutoScore {
+		criteria = append(criteria, byScore)
+	}
+
+	hasScore := !skipAutoScore
+	hasFrecency := false
 	hasIndex := false
 	hasChunk := false
 	hasLength := false
@@ -1283,8 +1296,18 @@ func parseTiebreak(str string) ([]criterion, error) {
 		*notExpected = true
 		return nil
 	}
-	for _, str := range strings.Split(strings.ToLower(str), ",") {
+	for _, str := range parts {
 		switch str {
+		case "score":
+			if err := check(&hasScore, "score"); err != nil {
+				return nil, err
+			}
+			criteria = append(criteria, byScore)
+		case "frecency":
+			if err := check(&hasFrecency, "frecency"); err != nil {
+				return nil, err
+			}
+			criteria = append(criteria, byFrecency)
 		case "index":
 			if err := check(&hasIndex, "index"); err != nil {
 				return nil, err
@@ -2768,9 +2791,8 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 		case "--no-ansi":
 			opts.Ansi = false
 		case "--frecency":
-			opts.Frecency = true
-		case "--no-frecency":
-			opts.Frecency = false
+			// Set default frecency criteria (backward compatible)
+			opts.Criteria = []criterion{byFrecency, byScore, byLength}
 		case "--frecency-file":
 			if opts.FrecencyFile, err = nextString("file path required"); err != nil {
 				return err
@@ -3698,11 +3720,6 @@ func postProcessOptions(opts *Options) error {
 
 	if err := opts.initProfiling(); err != nil {
 		return errors.New("failed to start pprof profiles: " + err.Error())
-	}
-
-	// Prepend byFrecency when --frecency flag is set
-	if opts.Frecency {
-		opts.Criteria = append([]criterion{byFrecency}, opts.Criteria...)
 	}
 
 	algo.Init(opts.Scheme)

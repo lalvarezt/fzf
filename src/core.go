@@ -59,7 +59,15 @@ func Run(opts *Options) (int, error) {
 
 	// Frecency database
 	var frecencyDB *FrecencyDB
-	if opts.Frecency || opts.FrecencyDebug {
+	// Check if frecency is in criteria
+	hasFrecency := false
+	for _, c := range opts.Criteria {
+		if c == byFrecency {
+			hasFrecency = true
+			break
+		}
+	}
+	if hasFrecency || opts.FrecencyDebug {
 		path := opts.FrecencyFile
 		if path == "" {
 			var err error
