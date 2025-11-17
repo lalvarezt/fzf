@@ -180,6 +180,8 @@ Comma-separated list of sort criteria to apply when the scores are tied.
 .br
 
 .br
+.BR frecency "  Prefers line with higher frecency score (loads database automatically)"
+.br
 .BR length "   Prefers line with shorter length"
 .br
 .BR chunk "    Prefers line with shorter matched chunk (delimited by whitespaces)"
@@ -221,7 +223,7 @@ continuous score that is prepended to the sort criteria. The raw score is
 calculated as:
 .RS
 .nf
-log\~\_2(frequency + 1) × 0.5^(age / 24h) × momentum
+log\~\_2(frequency + 1) × 0.5^(age / 30d) × momentum
 momentum = 1 + 0.5 × (1 - clamp(gap / 6h, 0, 1))
 .fi
 .RE
@@ -231,15 +233,18 @@ where:
 \fIfrequency\fR is the total number of selections for the item, compressed with
 log\~\_2 so heavily used entries stay ahead without overwhelming the list.
 .IP \[bu] 2
-\fIage\fR is the time since the last selection. Every 24 hours halves the score,
-so stale entries fade smoothly.
+\fIage\fR is the time since the last selection. The default 30-day half-life
+means an item unused for 30 days contributes half as much, so stale entries fade
+smoothly while preserving long-term patterns.
 .IP \[bu] 2
 \fIgap\fR is the time between the two most recent selections. Picking the same
 item again within six hours grants up to a 50% momentum boost (items selected
 only once have a momentum factor of 1.0).
 .RE
-The raw value is then scaled into the 0–65535 range with \fBlog\~\_10(raw + 1) ×
-10,922.5\fR so it can participate in the standard sorting pipeline.
+The raw value is then scaled into the 0–65535 range by multiplying by a scale
+factor (default: 3150) and capping at the maximum: \fBmin(raw × 3150, 65535)\fR.
+This linear scaling allows the score to participate in the standard sorting
+pipeline.
 .TP
 .BI "\-\-frecency\-file=" "PATH"
 Specify a custom path for the frecency database file. By default, fzf stores
@@ -262,6 +267,45 @@ RAW         FREQ    LAST_ACCESS       AGE     DECAY    MOMENTUM   SCALED      IT
 1.00        1       2025-10-15 10:50  15m     0.990    1.000      3471        ~/src/project/docs/spec.md
 .fi
 .RE
+.TP
+.BI "\-\-frecency\-scale\-factor=" "N"
+Adjust the scale factor applied to raw frecency scores. The raw score (frequency
+× recency × momentum) is multiplied by this factor and capped at 65535 to fit
+in the uint16 sorting range. Default: \fB3150.0\fR
+.sp
+Higher values provide better separation between items with similar raw scores,
+reducing score collisions. Lower values compress the range, making scores more
+similar. If you experience items with similar usage patterns being sorted
+inconsistently, increase this value (e.g., 5000 or 10000).
+.TP
+.BI "\-\-frecency\-half\-life=" "DURATION"
+Set the time period for frecency scores to decay by 50%. This controls how
+quickly older items lose relevance. Default: \fB30d\fR
+.sp
+Accepts Go duration format (e.g., \fB24h\fR, \fB168h\fR) or common shorthands:
+\fBd\fR (days), \fBw\fR (weeks), \fBmo\fR (months), \fBy\fR (years).
+Examples: \fB7d\fR for weekly projects, \fB90d\fR for long-term reference items.
+Shorter half-lives favor recent activity; longer half-lives preserve historical
+patterns.
+.TP
+.BI "\-\-frecency\-momentum\-window=" "DURATION"
+Set the time window within which repeated selections receive a momentum boost.
+If an item is selected again within this window, it gets additional weight.
+Default: \fB6h\fR
+.sp
+Accepts same duration formats as \fB\-\-frecency\-half\-life\fR.
+Examples: \fB1h\fR for focused work sessions, \fB12h\fR for full workday
+context. The boost decays linearly within the window (immediate re-selection
+gets maximum boost, end of window gets none).
+.TP
+.BI "\-\-frecency\-momentum\-boost=" "N"
+Set the maximum momentum multiplier for items selected again within the momentum
+window. Default: \fB0.5\fR (range: \fB0.0\fR\(en\fB1.0\fR)
+.sp
+A value of \fB0.5\fR means an immediately re-selected item gets 1.5× the base
+score (1.0 + 0.5). Higher values (e.g., \fB1.0\fR) give stronger preference to
+recently repeated items; lower values (e.g., \fB0.2\fR) reduce the burst effect.
+Set to \fB0.0\fR to disable momentum entirely.
 .TP
 .B "\-\-sync"
 Synchronous search for multi-staged filtering. If specified, fzf will launch

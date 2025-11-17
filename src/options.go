@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/junegunn/fzf/src/algo"
@@ -61,6 +62,18 @@ Usage: fzf [options]
     --frecency               Enable frecency-based sorting (frequency + recency)
     --frecency-file=PATH     Path to frecency database file
     --frecency-debug         Print frecency database and exit
+    --frecency-scale-factor=N
+                             Scale factor for frecency scores (default: 3150.0)
+                             Higher values provide better separation between items
+    --frecency-half-life=DURATION
+                             Time for frecency weight to decay by 50% (default: 30d)
+                             Examples: 24h, 7d, 30d, 90d
+    --frecency-momentum-window=DURATION
+                             Time window for momentum boost (default: 6h)
+                             Examples: 1h, 6h, 12h
+    --frecency-momentum-boost=N
+                             Maximum momentum multiplier (default: 0.5, range: 0.0-1.0)
+                             Higher values boost recently repeated items more
     --sync                   Synchronous search for multi-staged filtering
 
   GLOBAL STYLE
@@ -582,11 +595,15 @@ type Options struct {
 	Tail              int
 	Criteria          []criterion
 	Multi             int
-	Ansi              bool
-	Frecency          bool
-	FrecencyFile      string
-	FrecencyDebug     bool
-	Mouse             bool
+	Ansi                   bool
+	Frecency               bool
+	FrecencyFile           string
+	FrecencyDebug          bool
+	FrecencyScaleFactor    float64
+	FrecencyHalfLife       time.Duration
+	FrecencyMomentumWindow time.Duration
+	FrecencyMomentumBoost  float64
+	Mouse                  bool
 	BaseTheme         *tui.ColorTheme
 	Theme             *tui.ColorTheme
 	Black             bool
@@ -713,10 +730,14 @@ func defaultOptions() *Options {
 		Track:        trackDisabled,
 		Tac:          false,
 		Criteria:     []criterion{}, // Unknown
-		Multi:        0,
-		Ansi:         false,
-		Mouse:        true,
-		Theme:        theme,
+		Multi:                  0,
+		Ansi:                   false,
+		FrecencyScaleFactor:    3150.0,
+		FrecencyHalfLife:       30 * 24 * time.Hour,
+		FrecencyMomentumWindow: 6 * time.Hour,
+		FrecencyMomentumBoost:  0.5,
+		Mouse:                  true,
+		Theme:                  theme,
 		BaseTheme:    baseTheme,
 		Black:        false,
 		Bold:         true,
@@ -797,6 +818,34 @@ func atof(str string) (float64, error) {
 		return 0, errors.New("not a valid number: " + str)
 	}
 	return num, nil
+}
+
+func parseDuration(str string) (time.Duration, error) {
+	// Try Go's native duration parser first (handles h, m, s, ms, etc.)
+	if d, err := time.ParseDuration(str); err == nil {
+		return d, nil
+	}
+
+	// Support common shorthand: d (days), w (weeks), mo (months), y (years)
+	// Extract number and unit
+	var num float64
+	var unit string
+	if _, err := fmt.Sscanf(str, "%f%s", &num, &unit); err != nil {
+		return 0, errors.New("invalid duration format: " + str)
+	}
+
+	switch unit {
+	case "d", "day", "days":
+		return time.Duration(num * float64(24*time.Hour)), nil
+	case "w", "week", "weeks":
+		return time.Duration(num * float64(7*24*time.Hour)), nil
+	case "mo", "month", "months":
+		return time.Duration(num * float64(30*24*time.Hour)), nil
+	case "y", "year", "years":
+		return time.Duration(num * float64(365*24*time.Hour)), nil
+	default:
+		return 0, errors.New("unsupported duration unit: " + unit)
+	}
 }
 
 func splitNth(str string) ([]Range, error) {
@@ -2820,6 +2869,50 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			}
 		case "--frecency-debug":
 			opts.FrecencyDebug = true
+		case "--frecency-scale-factor":
+			str, err := nextString("scale factor required")
+			if err != nil {
+				return err
+			}
+			if opts.FrecencyScaleFactor, err = atof(str); err != nil {
+				return err
+			}
+			if opts.FrecencyScaleFactor <= 0 {
+				return errors.New("scale factor must be positive")
+			}
+		case "--frecency-half-life":
+			str, err := nextString("duration required")
+			if err != nil {
+				return err
+			}
+			if opts.FrecencyHalfLife, err = parseDuration(str); err != nil {
+				return err
+			}
+			if opts.FrecencyHalfLife <= 0 {
+				return errors.New("half-life must be positive")
+			}
+		case "--frecency-momentum-window":
+			str, err := nextString("duration required")
+			if err != nil {
+				return err
+			}
+			if opts.FrecencyMomentumWindow, err = parseDuration(str); err != nil {
+				return err
+			}
+			if opts.FrecencyMomentumWindow <= 0 {
+				return errors.New("momentum window must be positive")
+			}
+		case "--frecency-momentum-boost":
+			str, err := nextString("boost value required")
+			if err != nil {
+				return err
+			}
+			if opts.FrecencyMomentumBoost, err = atof(str); err != nil {
+				return err
+			}
+			if opts.FrecencyMomentumBoost < 0 || opts.FrecencyMomentumBoost > 1 {
+				return errors.New("momentum boost must be between 0.0 and 1.0")
+			}
 		case "--no-mouse":
 			opts.Mouse = false
 		case "+c", "--no-color":

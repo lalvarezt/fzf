@@ -761,23 +761,24 @@ rewritten when fzf exits.
 The score used for ordering is the product of three factors:
 
 ```
-raw = log₂(frequency + 1) × 0.5^(age / 24h) × momentum
+raw = log₂(frequency + 1) × 0.5^(age / 30d) × momentum
 momentum = 1 + 0.5 × (1 - clamp(gap / 6h, 0, 1))
 ```
 
 - `frequency` is the total number of selections for the item. Using `log₂`
   keeps ultra-popular entries strong without letting them dominate everything.
-- `age` is the time since the most recent selection. Each additional 24 hours
-  halves the contribution of the item, so one week of inactivity reduces the
-  score by about 1/128.
+- `age` is the time since the most recent selection. The default 30-day half-life
+  means an item unused for 30 days contributes half as much; one week of inactivity
+  reduces the score to about 86% of its original value.
 - `gap` is the time between the last two selections. Opening the same target
   again within six hours applies up to a 50 % momentum boost; the effect fades
   linearly to zero as the gap approaches the six-hour window.
   When an item has only been chosen once, the momentum factor stays at 1.0.
 
-The raw score is converted to a 0–65535 range with
-`log₁₀(raw + 1) × 10922.5` so it fits into the existing sort machinery. You
-can inspect the database with `fzf --frecency-debug`, which prints:
+The raw score is converted to a 0–65535 range by multiplying by a scale factor
+(default: 3150) and capping at the maximum: `min(raw × 3150, 65535)`. This
+linear scaling fits the score into the existing sort machinery. You can inspect
+the database with `fzf --frecency-debug`, which prints:
 
 ```
 RAW         FREQ    LAST_ACCESS       AGE     DECAY    MOMENTUM   SCALED      ITEM
@@ -796,14 +797,47 @@ RAW         FREQ    LAST_ACCESS       AGE     DECAY    MOMENTUM   SCALED      IT
 
 | Scenario                       | Calculation                                                                 | Raw score |
 | ------------------------------ | ---------------------------------------------------------------------------- | --------- |
-| Single fresh selection        | `log₂(1 + 1) × 0.5^(10 min / 24 h) × 1.0 = 1.00`                             | 1.00      |
-| Daily favorite (20 uses)      | `log₂(20 + 1) × 0.5^(20 h / 24 h) × 1.0 ≈ 2.47`                             | 2.47      |
-| Quick follow-up (2 picks, 15m)| `log₂(2 + 1) × 0.5^(5 min / 24 h) × (1 + 0.5 × (1 - 0.25/6)) ≈ 2.34`       | 2.34      |
+| Single fresh selection        | `log₂(1 + 1) × 0.5^(10 min / 30 d) × 1.0 = 1.00`                             | 1.00      |
+| Daily favorite (20 uses)      | `log₂(20 + 1) × 0.5^(20 h / 30 d) × 1.0 ≈ 4.39`                             | 4.39      |
+| Quick follow-up (2 picks, 15m)| `log₂(2 + 1) × 0.5^(5 min / 30 d) × (1 + 0.5 × (1 - (15min / 6h))) ≈ 2.34`       | 2.34      |
 
-These numbers make it easy to reason about how a frequently opened file that
-sat idle for a day competes with something touched only once a few minutes ago:
-the decayed daily favorite still outranks the single-hit entry, while back-to-
-back picks claim the top spot thanks to the momentum boost.
+These numbers show how a frequently used file competes with fresh single-use
+items: the daily favorite with higher frequency clearly outranks the single-hit
+entry, while back-to-back picks claim the top spot thanks to the momentum boost.
+With the 30-day half-life, recent usage matters less for frequently used items.
+
+**Customizing frecency behavior**
+
+The frecency algorithm can be tuned with several options to match your workflow:
+
+- `--frecency-scale-factor=N` (default: 3150.0) — Adjusts score separation. If
+  items with similar usage patterns sort inconsistently, increase this value
+  (e.g., 5000 or 10000) to reduce score collisions. Lower values compress the
+  score range.
+
+- `--frecency-half-life=DURATION` (default: 30d) — Controls decay rate. Use
+  shorter values like `7d` for weekly projects where last week's files should
+  fade quickly. Use longer values like `90d` for reference materials you access
+  irregularly over months. Accepts Go duration format (`24h`, `168h`) or
+  shorthands (`d` for days, `w` for weeks, `mo` for months, `y` for years).
+
+- `--frecency-momentum-window=DURATION` (default: 6h) — Sets the time window
+  for momentum boost. Use `1h` for focused coding sessions where you work on
+  just a few files, or `12h` for full workday context. Items re-selected within
+  this window get extra weight.
+
+- `--frecency-momentum-boost=N` (default: 0.5, range: 0.0–1.0) — Maximum
+  momentum multiplier. Higher values (e.g., `1.0`) strongly favor burst
+  activity; lower values (e.g., `0.2`) reduce the burst effect. Set to `0.0` to
+  disable momentum entirely.
+
+Example: For a project with daily rotation, tune for shorter memory:
+
+```sh
+find . -type f | fzf --frecency \
+  --frecency-half-life=7d \
+  --frecency-momentum-window=2h
+```
 
 ### Performance
 

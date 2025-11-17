@@ -22,12 +22,16 @@ type FrecencyEntry struct {
 
 // FrecencyDB manages the frecency database
 type FrecencyDB struct {
-	entries     map[string]*FrecencyEntry
-	scores      sync.Map  // Cached scaled scores for fast lookup
-	sessionTime time.Time // Frozen time at startup for consistent relative ordering during session
-	path        string
-	mutex       sync.RWMutex
-	dirty       bool
+	entries        map[string]*FrecencyEntry
+	scores         sync.Map  // Cached scaled scores for fast lookup
+	sessionTime    time.Time // Frozen time at startup for consistent relative ordering during session
+	path           string
+	mutex          sync.RWMutex
+	dirty          bool
+	scaleFactor    float64
+	halfLife       time.Duration
+	momentumWindow time.Duration
+	momentumBoost  float64
 }
 
 // Frecency scoring uses frequency, recency, and momentum to rank items.
@@ -37,10 +41,10 @@ type FrecencyDB struct {
 //
 // Components:
 //   - Frequency: log₂ provides logarithmic growth - each doubling adds ~1 to score
-//   - Recency: exponential decay with 30-day half-life (items lose 50% weight per month)
-//   - Momentum: 1.0-1.5x multiplier for items selected again within 6 hours
+//   - Recency: exponential decay with configurable half-life (default: 30d)
+//   - Momentum: multiplier for items selected again within configurable window (default: 6h, boost: 0.5)
 //
-// The 30-day half-life preserves long-term usage patterns:
+// With default 30-day half-life, long-term usage patterns are preserved:
 //   - After 1 month: 50% of original weight
 //   - After 2 months: 25% of original weight
 //   - After 3 months: 12.5% of original weight
@@ -48,11 +52,11 @@ type FrecencyDB struct {
 // Scaling to uint16 range [0, 65535]:
 //   scaledScore = min(rawScore × scaleFactor, 65535)
 //
-// Scale factor optimized for max frequency of ~15,000 (5-10 years of power user):
+// Default scale factor (3150) optimized for max frequency ~15,000 (5-10 years of power user):
 //   maxRaw = log₂(15,001) × 1.0 × 1.5 ≈ 20.81
 //   scaleFactor = 65,535 / 20.81 ≈ 3,150
 //
-// Score distribution across realistic usage patterns:
+// Score distribution with default parameters (scaleFactor=3150, halfLife=30d, momentumBoost=0.5):
 //   | Frequency | Age  | Momentum | Raw Score | Scaled | % uint16 |
 //   |-----------|------|----------|-----------|--------|----------|
 //   | 15,000    | 0d   | 1.5      | 20.81     | 65,535 | 100.0%   |
@@ -67,17 +71,11 @@ type FrecencyDB struct {
 //
 // This provides excellent uint16 range utilization (80-100% for active users)
 // while maintaining good score separation across all frequency levels.
-const (
-	frecencyScaleFactor = 3150.0
-	frecencyHalfLife    = 30 * 24 * time.Hour
-	momentumWindow      = 6 * time.Hour
-	momentumMaxBoost    = 0.5
-	logHalf             = -0.6931471805599453 // math.Log(0.5)
-)
+const logHalf = -0.6931471805599453 // math.Log(0.5)
 
 // NewFrecencyDB creates a new frecency database
 // If customPath is empty, uses the default platform-specific path
-func NewFrecencyDB(customPath string) *FrecencyDB {
+func NewFrecencyDB(customPath string, scaleFactor float64, halfLife, momentumWindow time.Duration, momentumBoost float64) *FrecencyDB {
 	path := customPath
 	if path == "" {
 		var err error
@@ -89,11 +87,15 @@ func NewFrecencyDB(customPath string) *FrecencyDB {
 	}
 
 	return &FrecencyDB{
-		entries:     make(map[string]*FrecencyEntry),
-		scores:      sync.Map{},
-		sessionTime: time.Now(),
-		path:        path,
-		dirty:       false,
+		entries:        make(map[string]*FrecencyEntry),
+		scores:         sync.Map{},
+		sessionTime:    time.Now(),
+		path:           path,
+		dirty:          false,
+		scaleFactor:    scaleFactor,
+		halfLife:       halfLife,
+		momentumWindow: momentumWindow,
+		momentumBoost:  momentumBoost,
 	}
 }
 
@@ -219,7 +221,7 @@ func (db *FrecencyDB) Save() error {
 // Applies linear scaling: scaledScore = min(rawScore × scaleFactor, 65535)
 func (db *FrecencyDB) calculateAndStoreScore(item string, entry *FrecencyEntry) {
 	rawScore, _, _, _ := db.scoreComponents(entry, db.sessionTime)
-	scaledScore := math.Min(rawScore*frecencyScaleFactor, 65535)
+	scaledScore := math.Min(rawScore*db.scaleFactor, 65535)
 	db.scores.Store(item, scaledScore)
 }
 
@@ -235,7 +237,7 @@ func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw,
 	if duration < 0 {
 		duration = 0
 	}
-	halfLifeSeconds := frecencyHalfLife.Seconds()
+	halfLifeSeconds := db.halfLife.Seconds()
 	if halfLifeSeconds <= 0 {
 		halfLifeSeconds = 1
 	}
@@ -248,13 +250,13 @@ func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw,
 		if delta < 0 {
 			delta = 0
 		}
-		if delta < momentumWindow {
-			window := momentumWindow.Seconds()
+		if delta < db.momentumWindow {
+			window := db.momentumWindow.Seconds()
 			if window <= 0 {
 				window = 1
 			}
 			gapRatio := delta.Seconds() / window
-			momentumComponent += momentumMaxBoost * (1.0 - gapRatio)
+			momentumComponent += db.momentumBoost * (1.0 - gapRatio)
 		}
 	}
 
@@ -451,7 +453,7 @@ func printFrecencyTable(db *FrecencyDB) (int, error) {
 	now := time.Now()
 	for item, entry := range db.entries {
 		rawScore, freqComponent, decayComponent, momentumComponent := db.scoreComponents(entry, now)
-		scaled := math.Min(rawScore*frecencyScaleFactor, 65535)
+		scaled := math.Min(rawScore*db.scaleFactor, 65535)
 		last := time.Unix(entry.LastAccess, 0)
 		age := now.Sub(last)
 		if age < 0 {

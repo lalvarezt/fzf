@@ -80,7 +80,7 @@ func Run(opts *Options) (int, error) {
 
 		// Initialize and load database if path was determined
 		if path != "" {
-			frecencyDB = NewFrecencyDB(path)
+			frecencyDB = NewFrecencyDB(path, opts.FrecencyScaleFactor, opts.FrecencyHalfLife, opts.FrecencyMomentumWindow, opts.FrecencyMomentumBoost)
 			if err := frecencyDB.Load(); err != nil {
 				// Warn but continue with empty DB
 				fmt.Fprintf(os.Stderr, "Warning: could not load frecency database: %v\n", err)
