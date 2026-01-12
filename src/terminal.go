@@ -904,7 +904,7 @@ func evaluateHeight(opts *Options, termHeight int) int {
 		if opts.Height.inverse {
 			size = 100 - size
 		}
-		return util.Max(int(size*float64(termHeight)/100.0), opts.MinHeight)
+		return max(int(size*float64(termHeight)/100.0), opts.MinHeight)
 	}
 	if opts.Height.inverse {
 		size = float64(termHeight) - size
@@ -960,7 +960,7 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 				effectiveMinHeight--
 			}
 			effectiveMinHeight += borderLines(opts.BorderShape)
-			return util.Min(termHeight, util.Max(evaluateHeight(opts, termHeight), effectiveMinHeight))
+			return min(termHeight, max(evaluateHeight(opts, termHeight), effectiveMinHeight))
 		}
 		renderer, err = tui.NewLightRenderer(opts.TtyDefault, ttyin, opts.Theme, opts.Black, opts.Mouse, opts.Tabstop, opts.ClearOnExit, false, maxHeightFunc)
 	}
@@ -1157,8 +1157,8 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 		t.pointerEmpty = ""
 		t.pointerEmptyRaw = ""
 	} else {
-		t.pointerEmpty = gutterChar + strings.Repeat(" ", util.Max(0, t.pointerLen-1))
-		t.pointerEmptyRaw = gutterRawChar + strings.Repeat(" ", util.Max(0, t.pointerLen-1))
+		t.pointerEmpty = gutterChar + strings.Repeat(" ", max(0, t.pointerLen-1))
+		t.pointerEmptyRaw = gutterRawChar + strings.Repeat(" ", max(0, t.pointerLen-1))
 	}
 	t.markerEmpty = strings.Repeat(" ", t.markerLen)
 
@@ -1353,7 +1353,7 @@ func (t *Terminal) environImpl(forPreview bool) []string {
 	env = append(env, fmt.Sprintf("FZF_SELECT_COUNT=%d", len(t.selected)))
 	env = append(env, fmt.Sprintf("FZF_LINES=%d", t.areaLines))
 	env = append(env, fmt.Sprintf("FZF_COLUMNS=%d", t.areaColumns))
-	env = append(env, fmt.Sprintf("FZF_POS=%d", util.Min(t.merger.Length(), t.cy+1)))
+	env = append(env, fmt.Sprintf("FZF_POS=%d", min(t.merger.Length(), t.cy+1)))
 	env = append(env, fmt.Sprintf("FZF_CLICK_HEADER_LINE=%d", t.clickHeaderLine))
 	env = append(env, fmt.Sprintf("FZF_CLICK_HEADER_COLUMN=%d", t.clickHeaderColumn))
 	env = append(env, fmt.Sprintf("FZF_CLICK_FOOTER_LINE=%d", t.clickFooterLine))
@@ -1590,12 +1590,12 @@ func getScrollbar(perLine int, total int, height int, offset int) (int, int) {
 	if total == 0 || total*perLine <= height {
 		return 0, 0
 	}
-	barLength := util.Max(1, height*height/(total*perLine))
+	barLength := max(1, height*height/(total*perLine))
 	var barStart int
 	if total == height {
 		barStart = 0
 	} else {
-		barStart = util.Min(height-barLength, (height*perLine-barLength)*offset/(total*perLine-height))
+		barStart = min(height-barLength, (height*perLine-barLength)*offset/(total*perLine-height))
 	}
 	return barLength, barStart
 }
@@ -1611,7 +1611,7 @@ func (t *Terminal) wrapCols() int {
 	if !t.wrap {
 		return 0 // No wrap
 	}
-	return util.Max(t.window.Width()-(t.pointerLen+t.markerLen+t.barCol()), 1)
+	return max(t.window.Width()-(t.pointerLen+t.markerLen+t.barCol()), 1)
 }
 
 func (t *Terminal) clearNumLinesCache() {
@@ -1666,7 +1666,7 @@ func (t *Terminal) avgNumLines() int {
 	numLines := 0
 	count := 0
 	total := t.merger.Length()
-	offset := util.Max(0, util.Min(t.offset, total-maxItems-1))
+	offset := max(0, min(t.offset, total-maxItems-1))
 	for idx := 0; idx < maxItems && idx+offset < total; idx++ {
 		result := t.merger.Get(idx + offset)
 		lines, _ := t.numItemLines(result.item, maxItems)
@@ -1826,7 +1826,7 @@ func (t *Terminal) UpdateList(result MatchResult) {
 			t.offset = 0
 		} else if t.cy > count {
 			// Try to keep the vertical position when the list shrinks
-			t.cy = count - util.Min(count, t.maxItems()) + pos
+			t.cy = count - min(count, t.maxItems()) + pos
 		}
 	}
 	needActivation := false
@@ -2001,17 +2001,17 @@ func (t *Terminal) adjustMarginAndPadding() (int, int, [4]int, [4]int) {
 		marginInt[idx] = sizeSpecToInt(idx, sizeSpec) + extraMargin[idx]
 	}
 
-	adjust := func(idx1 int, idx2 int, max int, min int) {
-		if min > max {
-			min = max
+	adjust := func(idx1 int, idx2 int, maximum int, minimum int) {
+		if minimum > maximum {
+			minimum = maximum
 		}
 		margin := marginInt[idx1] + marginInt[idx2] + paddingInt[idx1] + paddingInt[idx2]
-		if max-margin < min {
-			desired := max - min
+		if maximum-margin < minimum {
+			desired := maximum - minimum
 			paddingInt[idx1] = desired * paddingInt[idx1] / margin
 			paddingInt[idx2] = desired * paddingInt[idx2] / margin
-			marginInt[idx1] = util.Max(extraMargin[idx1], desired*marginInt[idx1]/margin)
-			marginInt[idx2] = util.Max(extraMargin[idx2], desired*marginInt[idx2]/margin)
+			marginInt[idx1] = max(extraMargin[idx1], desired*marginInt[idx1]/margin)
+			marginInt[idx2] = max(extraMargin[idx2], desired*marginInt[idx2]/margin)
 		}
 	}
 
@@ -2028,10 +2028,10 @@ func (t *Terminal) adjustMarginAndPadding() (int, int, [4]int, [4]int) {
 		switch t.activePreviewOpts.position {
 		case posUp, posDown:
 			minAreaHeight += minPreviewHeight
-			minAreaWidth = util.Max(minPreviewWidth, minAreaWidth)
+			minAreaWidth = max(minPreviewWidth, minAreaWidth)
 		case posLeft, posRight:
 			minAreaWidth += minPreviewWidth
-			minAreaHeight = util.Max(minPreviewHeight, minAreaHeight)
+			minAreaHeight = max(minPreviewHeight, minAreaHeight)
 		}
 	}
 	adjust(1, 3, screenWidth, minAreaWidth)
@@ -2505,7 +2505,7 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 			width++
 		}
 		// Make sure that the width does not exceed the list width
-		width = util.Min(t.window.Width()+t.headerIndentImpl(0, shape), width)
+		width = min(t.window.Width()+t.headerIndentImpl(0, shape), width)
 		height := b.Height() - borderLines(shape)
 		return t.tui.NewWindow(top, left, width, height, windowType, noBorder, true)
 	}
@@ -2669,11 +2669,11 @@ func (t *Terminal) printLabel(window tui.Window, render labelPrinter, opts label
 		}
 		var col int
 		if opts.column == 0 {
-			col = util.Max(0, (window.Width()-length)/2)
+			col = max(0, (window.Width()-length)/2)
 		} else if opts.column < 0 {
-			col = util.Max(0, window.Width()+opts.column+1-length)
+			col = max(0, window.Width()+opts.column+1-length)
 		} else {
-			col = util.Min(opts.column-1, window.Width()-length)
+			col = min(opts.column-1, window.Width()-length)
 		}
 		row := 0
 		if borderShape == tui.BorderBottom || opts.bottom {
@@ -2728,7 +2728,7 @@ func (t *Terminal) truncateQuery() {
 	// the user accidentally pastes a huge chunk of text. Therefore, we're not
 	// interested in the exact display width of the query. We just limit the
 	// number of runes.
-	t.input = t.input[:util.Min(len(t.input), maxPatternLength)]
+	t.input = t.input[:min(len(t.input), maxPatternLength)]
 	t.cx = util.Constrain(t.cx, 0, len(t.input))
 }
 
@@ -2737,11 +2737,11 @@ func (t *Terminal) updatePromptOffset() ([]rune, []rune) {
 	if t.inputWindow != nil {
 		w = t.inputWindow
 	}
-	maxWidth := util.Max(1, w.Width()-t.promptLen-1)
+	maxWidth := max(1, w.Width()-t.promptLen-1)
 
 	_, overflow := t.trimLeft(t.input[:t.cx], maxWidth, 0)
 	minOffset := int(overflow)
-	maxOffset := minOffset + (maxWidth-util.Max(0, maxWidth-t.cx))/2
+	maxOffset := minOffset + (maxWidth-max(0, maxWidth-t.cx))/2
 	t.xoffset = util.Constrain(t.xoffset, minOffset, maxOffset)
 	before, _ := t.trimLeft(t.input[t.xoffset:t.cx], maxWidth, 0)
 	beforeLen := t.displayWidth(before)
@@ -2763,7 +2763,7 @@ func (t *Terminal) promptLine() int {
 		if !t.noSeparatorLine() {
 			max--
 		}
-		return util.Min(t.visibleHeaderLinesInList(), max)
+		return min(t.visibleHeaderLinesInList(), max)
 	}
 	return 0
 }
@@ -2778,11 +2778,11 @@ func (t *Terminal) placeCursor() {
 		if t.layout == layoutReverse {
 			y = 0
 		}
-		x = util.Min(x, t.inputWindow.Width()-1)
+		x = min(x, t.inputWindow.Width()-1)
 		t.inputWindow.Move(y, x)
 		return
 	}
-	x = util.Min(x, t.window.Width()-1)
+	x = min(x, t.window.Width()-1)
 	t.move(t.promptLine(), x, false)
 }
 
@@ -2801,7 +2801,7 @@ func (t *Terminal) printPrompt() {
 
 	before, after := t.updatePromptOffset()
 	if len(before) == 0 && len(after) == 0 && len(t.ghost) > 0 {
-		maxWidth := util.Max(1, w.Width()-t.promptLen-1)
+		maxWidth := max(1, w.Width()-t.promptLen-1)
 		runes, _ := t.trimRight([]rune(t.ghost), maxWidth)
 		w.CPrint(tui.ColGhost, string(runes))
 		return
@@ -2891,7 +2891,7 @@ func (t *Terminal) printInfoImpl() {
 	}
 
 	found := t.resultMerger.Length()
-	total := util.Max(found, t.count)
+	total := max(found, t.count)
 	output := fmt.Sprintf("%d/%d", found, total)
 	if t.toggleSort {
 		if t.sort {
@@ -2985,7 +2985,7 @@ func (t *Terminal) printInfoImpl() {
 	if t.infoStyle == infoInlineRight {
 		if len(t.infoPrefix) == 0 {
 			move(line, pos, false)
-			newPos := util.Max(pos, t.window.Width()-outputLen-3)
+			newPos := max(pos, t.window.Width()-outputLen-3)
 			t.window.Print(strings.Repeat(" ", newPos-pos))
 			pos = newPos
 			if pos < t.window.Width() {
@@ -2997,7 +2997,7 @@ func (t *Terminal) printInfoImpl() {
 				pos++
 			}
 		} else {
-			pos = util.Max(pos, t.window.Width()-outputLen-util.StringWidth(t.infoPrefix)-1)
+			pos = max(pos, t.window.Width()-outputLen-util.StringWidth(t.infoPrefix)-1)
 			printInfoPrefix()
 		}
 	}
@@ -3093,7 +3093,7 @@ func (t *Terminal) printFooter() {
 	}
 	indentSize := t.headerIndent(t.footerBorderShape)
 	indent := strings.Repeat(" ", indentSize)
-	max := util.Min(len(t.footer), t.footerWindow.Height())
+	max := min(len(t.footer), t.footerWindow.Height())
 
 	// Wrapping is not supported for footer
 	wrap := t.wrap
@@ -3318,7 +3318,7 @@ func (t *Terminal) printItem(result Result, line int, maxLine int, index int, cu
 			} else {
 				alt = index%2 == 1
 			}
-			label = t.jumpLabels[index:index+1] + strings.Repeat(" ", util.Max(0, t.pointerLen-1))
+			label = t.jumpLabels[index:index+1] + strings.Repeat(" ", max(0, t.pointerLen-1))
 			if t.pointerLen == 0 {
 				extraWidth = 1
 			}
@@ -3488,7 +3488,7 @@ func (t *Terminal) displayWidthWithLimit(runes []rune, prefixWidth int, limit in
 }
 
 func (t *Terminal) trimLeft(runes []rune, width int, ellipsisWidth int) ([]rune, int32) {
-	width = util.Max(0, width)
+	width = max(0, width)
 	var trimmed int32
 	// Assume that each rune takes at least one column on screen
 	if len(runes) > width {
@@ -3579,12 +3579,12 @@ func (t *Terminal) printHighlighted(result Result, colBase tui.ColorPair, colMat
 		// ------>       <------
 		if t.freezeLeft > 0 {
 			if len(tokens) > 0 {
-				token := tokens[util.Min(t.freezeLeft, len(tokens))-1]
+				token := tokens[min(t.freezeLeft, len(tokens))-1]
 				splitOffset1 = int(token.prefixLength) + token.text.Length() - token.text.TrailingWhitespaces()
 			}
 		}
 		if t.freezeRight > 0 {
-			index := util.Max(t.freezeLeft-1, len(tokens)-t.freezeRight-1)
+			index := max(t.freezeLeft-1, len(tokens)-t.freezeRight-1)
 			if index < 0 {
 				splitOffset2 = 0
 			} else if index >= t.freezeLeft {
@@ -3592,7 +3592,7 @@ func (t *Terminal) printHighlighted(result Result, colBase tui.ColorPair, colMat
 				delimiter := strings.TrimLeftFunc(GetLastDelimiter(token.text.ToString(), t.delimiter), unicode.IsSpace)
 				splitOffset2 = int(token.prefixLength) + token.text.Length() - len([]rune(delimiter))
 			}
-			splitOffset2 = util.Max(splitOffset2, splitOffset1)
+			splitOffset2 = max(splitOffset2, splitOffset1)
 		}
 	}
 
@@ -3682,7 +3682,7 @@ func (t *Terminal) printHighlighted(result Result, colBase tui.ColorPair, colMat
 		var maxEnd int
 		for _, offset := range offsets {
 			if offset.match {
-				maxEnd = util.Max(maxEnd, int(offset.offset[1]))
+				maxEnd = max(maxEnd, int(offset.offset[1]))
 			}
 		}
 
@@ -3781,19 +3781,19 @@ func (t *Terminal) printHighlighted(result Result, colBase tui.ColorPair, colMat
 			}
 			displayWidth = t.displayWidthWithLimit(runes, 0, adjustedMaxWidth)
 			if !t.wrap && displayWidth > adjustedMaxWidth {
-				maxe = util.Constrain(maxe+util.Min(maxWidth/2-ellipsisWidth, t.hscrollOff), 0, len(runes))
+				maxe = util.Constrain(maxe+min(maxWidth/2-ellipsisWidth, t.hscrollOff), 0, len(runes))
 				transformOffsets := func(diff int32, rightTrim bool) {
 					for idx, offset := range offs {
 						b, e := offset.offset[0], offset.offset[1]
 						el := int32(len(ellipsis))
 						b += el - diff
 						e += el - diff
-						b = util.Max32(b, el)
+						b = max(b, el)
 						if rightTrim {
-							e = util.Min32(e, int32(maxWidth-ellipsisWidth))
+							e = min(e, int32(maxWidth-ellipsisWidth))
 						}
 						offs[idx].offset[0] = b
-						offs[idx].offset[1] = util.Max32(b, e)
+						offs[idx].offset[1] = max(b, e)
 					}
 				}
 				if t.hscroll {
@@ -3825,8 +3825,8 @@ func (t *Terminal) printHighlighted(result Result, colBase tui.ColorPair, colMat
 					runes = append(runes, ellipsis...)
 
 					for idx, offset := range offs {
-						offs[idx].offset[0] = util.Min32(offset.offset[0], int32(maxWidth-len(ellipsis)))
-						offs[idx].offset[1] = util.Min32(offset.offset[1], int32(maxWidth))
+						offs[idx].offset[0] = min(offset.offset[0], int32(maxWidth-len(ellipsis)))
+						offs[idx].offset[1] = min(offset.offset[1], int32(maxWidth))
 					}
 				}
 				displayWidth = t.displayWidthWithLimit(runes, 0, maxWidth)
@@ -3873,8 +3873,8 @@ func (t *Terminal) printColoredString(window tui.Window, text []rune, offsets []
 	maxOffset := int32(len(text))
 	var url *url
 	for _, offset := range offsets {
-		b := util.Constrain32(offset.offset[0], index, maxOffset)
-		e := util.Constrain32(offset.offset[1], index, maxOffset)
+		b := util.Constrain(offset.offset[0], index, maxOffset)
+		e := util.Constrain(offset.offset[1], index, maxOffset)
 		if url != nil && offset.url != url {
 			url = nil
 			window.LinkEnd()
@@ -3955,7 +3955,7 @@ func (t *Terminal) renderPreviewArea(unchanged bool) {
 	body := t.previewer.lines
 	headerLines := t.activePreviewOpts.headerLines
 	// Do not enable preview header lines if it's value is too large
-	if headerLines > 0 && headerLines < util.Min(len(body), height) {
+	if headerLines > 0 && headerLines < min(len(body), height) {
 		header := t.previewer.lines[0:headerLines]
 		body = t.previewer.lines[headerLines:]
 		// Always redraw header
@@ -3973,7 +3973,7 @@ func (t *Terminal) renderPreviewArea(unchanged bool) {
 	}
 
 	effectiveHeight := height - headerLines
-	barLength, barStart := getScrollbar(1, len(body), effectiveHeight, util.Min(len(body)-effectiveHeight, t.previewer.offset-headerLines))
+	barLength, barStart := getScrollbar(1, len(body), effectiveHeight, min(len(body)-effectiveHeight, t.previewer.offset-headerLines))
 	t.renderPreviewScrollbar(headerLines, barLength, barStart)
 }
 
@@ -3988,7 +3988,7 @@ func (t *Terminal) makeImageBorder(width int, top bool) string {
 		h = "-"
 		v = "|"
 	}
-	repeat := util.Max(0, width-2)
+	repeat := max(0, width-2)
 	if top {
 		return tl + strings.Repeat(h, repeat) + tr
 	}
@@ -4523,7 +4523,7 @@ func (t *Terminal) evaluateScrollOffset() int {
 	}
 
 	base := -1
-	height := util.Max(0, t.pwindow.Height()-t.activePreviewOpts.headerLines)
+	height := max(0, t.pwindow.Height()-t.activePreviewOpts.headerLines)
 	for _, component := range offsetComponentRegex.FindAllString(offsetExpr, -1) {
 		if strings.HasPrefix(component, "-/") {
 			component = component[1:]
@@ -4537,7 +4537,7 @@ func (t *Terminal) evaluateScrollOffset() int {
 		}
 		base += atoi(component)
 	}
-	return util.Max(0, base)
+	return max(0, base)
 }
 
 func replacePlaceholder(params replacePlaceholderParams) (string, []string) {
@@ -5157,16 +5157,16 @@ func (t *Terminal) Loop() error {
 				if t.activePreviewOpts.aboveOrBelow() {
 					if t.activePreviewOpts.size.percent {
 						newContentHeight := int(float64(contentHeight) * 100. / (100. - t.activePreviewOpts.size.size))
-						contentHeight = util.Max(contentHeight+1+borderLines(t.activePreviewOpts.Border()), newContentHeight)
+						contentHeight = max(contentHeight+1+borderLines(t.activePreviewOpts.Border()), newContentHeight)
 					} else {
 						contentHeight += int(t.activePreviewOpts.size.size) + borderLines(t.activePreviewOpts.Border())
 					}
 				} else {
 					// Minimum height if preview window can appear
-					contentHeight = util.Max(contentHeight, 1+borderLines(t.activePreviewOpts.Border()))
+					contentHeight = max(contentHeight, 1+borderLines(t.activePreviewOpts.Border()))
 				}
 			}
-			return util.Min(termHeight, contentHeight+pad)
+			return min(termHeight, contentHeight+pad)
 		})
 	}
 
@@ -5567,7 +5567,7 @@ func (t *Terminal) Loop() error {
 						t.previewer.lines = result.lines
 						t.previewer.spinner = result.spinner
 						if t.hasPreviewWindow() && t.previewer.following.Enabled() {
-							t.previewer.offset = util.Max(t.previewer.offset, len(t.previewer.lines)-(t.pwindow.Height()-t.activePreviewOpts.headerLines))
+							t.previewer.offset = max(t.previewer.offset, len(t.previewer.lines)-(t.pwindow.Height()-t.activePreviewOpts.headerLines))
 						} else if result.offset >= 0 {
 							t.previewer.offset = util.Constrain(result.offset, t.activePreviewOpts.headerLines, len(t.previewer.lines)-1)
 						}
@@ -5629,7 +5629,7 @@ func (t *Terminal) Loop() error {
 			select {
 			case <-ctx.Done():
 				return
-			case t.keyChan <- t.tui.GetChar():
+			case t.keyChan <- t.tui.GetChar(t.listenAddr != nil):
 			}
 		}
 	}()
@@ -5716,6 +5716,13 @@ func (t *Terminal) Loop() error {
 					}
 				}
 			}
+			for _, action := range actions {
+				if action.t == actExecute {
+					t.tui.CancelGetChar()
+					break
+				}
+			}
+
 		case callback := <-t.callbackChan:
 			event = tui.Invalid.AsEvent()
 			actions = append(actions, &action{t: actAsync})
@@ -6337,7 +6344,7 @@ func (t *Terminal) Loop() error {
 
 				// Try to retain position
 				if prevIndex != minItem.Index() {
-					t.cy = util.Max(0, t.merger.FindIndex(prevIndex))
+					t.cy = max(0, t.merger.FindIndex(prevIndex))
 					t.offset = t.cy - prevPos
 				}
 
@@ -6433,7 +6440,7 @@ func (t *Terminal) Loop() error {
 					linesToMove = maxItems / 2
 				}
 				// Move at least one line even in a very short window
-				linesToMove = util.Max(1, linesToMove)
+				linesToMove = max(1, linesToMove)
 
 				// Determine the direction of the movement
 				direction := -1
@@ -6742,7 +6749,7 @@ func (t *Terminal) Loop() error {
 				if pbarDragging {
 					effectiveHeight := t.pwindow.Height() - headerLines
 					numLines := len(t.previewer.lines) - headerLines
-					barLength, _ := getScrollbar(1, numLines, effectiveHeight, util.Min(numLines-effectiveHeight, t.previewer.offset-headerLines))
+					barLength, _ := getScrollbar(1, numLines, effectiveHeight, min(numLines-effectiveHeight, t.previewer.offset-headerLines))
 					if barLength > 0 {
 						y := my - t.pwindow.Top() - headerLines - barLength/2
 						y = util.Constrain(y, 0, effectiveHeight-barLength)
@@ -7262,13 +7269,13 @@ func (t *Terminal) constrain() {
 			numItems = numItemsFound
 		}
 
-		t.cy = util.Constrain(t.cy, 0, util.Max(0, count-1))
-		minOffset := util.Max(t.cy-numItems+1, 0)
-		maxOffset := util.Max(util.Min(count-numItems, t.cy), 0)
+		t.cy = util.Constrain(t.cy, 0, max(0, count-1))
+		minOffset := max(t.cy-numItems+1, 0)
+		maxOffset := max(min(count-numItems, t.cy), 0)
 		prevOffset := t.offset
 		t.offset = util.Constrain(t.offset, minOffset, maxOffset)
 		if t.scrollOff > 0 {
-			scrollOff := util.Min(maxLines/2, t.scrollOff)
+			scrollOff := min(maxLines/2, t.scrollOff)
 			newOffset := t.offset
 			// 2-phase adjustment to avoid infinite loop of alternating between moving up and down
 			for phase := range 2 {
@@ -7295,9 +7302,9 @@ func (t *Terminal) constrain() {
 					}
 
 					if phase == 0 && linesBefore < scrollOff {
-						newOffset = util.Max(minOffset, newOffset-1)
+						newOffset = max(minOffset, newOffset-1)
 					} else if phase == 1 && linesAfter < scrollOff {
-						newOffset = util.Min(maxOffset, newOffset+1)
+						newOffset = min(maxOffset, newOffset+1)
 					}
 					if newOffset == prevOffset {
 						break
@@ -7354,8 +7361,8 @@ func (t *Terminal) promptLines() int {
 
 // Number of item lines in the list window
 func (t *Terminal) maxItems() int {
-	max := t.window.Height() - t.visibleHeaderLinesInList() - t.promptLines()
-	return util.Max(max, 0)
+	maximum := t.window.Height() - t.visibleHeaderLinesInList() - t.promptLines()
+	return max(maximum, 0)
 }
 
 func (t *Terminal) dumpItem(i *Item) StatusItem {
@@ -7392,12 +7399,12 @@ func (t *Terminal) dumpStatus(params getParams) string {
 	defer t.mutex.Unlock()
 
 	selectedItems := t.sortSelected()
-	selected := make([]StatusItem, util.Max(0, util.Min(params.limit, len(selectedItems)-params.offset)))
+	selected := make([]StatusItem, max(0, min(params.limit, len(selectedItems)-params.offset)))
 	for i := range selected {
 		selected[i] = t.dumpItem(selectedItems[i+params.offset].item)
 	}
 
-	matches := make([]StatusItem, util.Max(0, util.Min(params.limit, t.resultMerger.Length()-params.offset)))
+	matches := make([]StatusItem, max(0, min(params.limit, t.resultMerger.Length()-params.offset)))
 	for i := range matches {
 		matches[i] = t.dumpItem(t.resultMerger.Get(i + params.offset).item)
 	}

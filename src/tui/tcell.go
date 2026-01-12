@@ -246,7 +246,7 @@ func (r *FullscreenRenderer) Size() TermSize {
 	return TermSize{lines, cols, 0, 0}
 }
 
-func (r *FullscreenRenderer) GetChar() Event {
+func (r *FullscreenRenderer) GetChar(cancellable bool) Event {
 	ev := _screen.PollEvent()
 	switch ev := ev.(type) {
 	case *tcell.EventPaste:
@@ -703,6 +703,10 @@ func (r *FullscreenRenderer) GetChar() Event {
 	return Event{Invalid, 0, nil}
 }
 
+func (r *FullscreenRenderer) CancelGetChar() {
+	// TODO
+}
+
 func (r *FullscreenRenderer) Pause(clear bool) {
 	if clear {
 		_screen.Suspend()
@@ -729,8 +733,8 @@ func (r *FullscreenRenderer) RefreshWindows(windows []Window) {
 }
 
 func (r *FullscreenRenderer) NewWindow(top int, left int, width int, height int, windowType WindowType, borderStyle BorderStyle, erase bool) Window {
-	width = util.Max(0, width)
-	height = util.Max(0, height)
+	width = max(0, width)
+	height = max(0, height)
 	normal := ColBorder
 	switch windowType {
 	case WindowList:

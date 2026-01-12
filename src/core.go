@@ -39,6 +39,18 @@ func (r revision) compatible(other revision) bool {
 	return r.major == other.major
 }
 
+func buildItemTransformer(opts *Options) func(*Item) string {
+	if opts.AcceptNth != nil {
+		fn := opts.AcceptNth(opts.Delimiter)
+		return func(item *Item) string {
+			return item.acceptNth(opts.Ansi, opts.Delimiter, fn)
+		}
+	}
+	return func(item *Item) string {
+		return item.AsString(opts.Ansi)
+	}
+}
+
 // Run starts fzf
 func Run(opts *Options) (int, error) {
 	if opts.Filter == nil {
@@ -193,7 +205,7 @@ func Run(opts *Options) (int, error) {
 			if item.colors != nil {
 				for _, ansi := range *item.colors {
 					if ansi.color.bg >= 0 {
-						maxColorOffset = util.Max32(maxColorOffset, ansi.offset[1])
+						maxColorOffset = max(maxColorOffset, ansi.offset[1])
 					}
 				}
 			}
@@ -294,6 +306,8 @@ func Run(opts *Options) (int, error) {
 		pattern := patternBuilder([]rune(*opts.Filter))
 		matcher.sort = pattern.sortable
 
+		transformer := buildItemTransformer(opts)
+
 		found := false
 		if streamingFilter {
 			slab := util.MakeSlab(slab16Size, slab32Size)
@@ -304,7 +318,7 @@ func Run(opts *Options) (int, error) {
 					if chunkList.trans(&item, runes) {
 						mutex.Lock()
 						if result, _, _ := pattern.MatchItem(&item, false, slab); result != nil {
-							opts.Printer(item.text.ToString())
+							opts.Printer(transformer(&item))
 							found = true
 						}
 						mutex.Unlock()
@@ -322,7 +336,7 @@ func Run(opts *Options) (int, error) {
 				chunks:  snapshot,
 				pattern: pattern})
 			for i := 0; i < result.merger.Length(); i++ {
-				opts.Printer(result.merger.Get(i).item.AsString(opts.Ansi))
+				opts.Printer(transformer(result.merger.Get(i).item))
 				found = true
 			}
 		}
@@ -370,7 +384,7 @@ func Run(opts *Options) (int, error) {
 			if total >= maxFit || final {
 				deferred = false
 				heightUnknown = false
-				terminal.startChan <- fitpad{util.Min(total, maxFit), padHeight}
+				terminal.startChan <- fitpad{min(total, maxFit), padHeight}
 			}
 		} else if deferred {
 			deferred = false
@@ -544,15 +558,7 @@ func Run(opts *Options) (int, error) {
 									if len(opts.Expect) > 0 {
 										opts.Printer("")
 									}
-									transformer := func(item *Item) string {
-										return item.AsString(opts.Ansi)
-									}
-									if opts.AcceptNth != nil {
-										fn := opts.AcceptNth(opts.Delimiter)
-										transformer = func(item *Item) string {
-											return item.acceptNth(opts.Ansi, opts.Delimiter, fn)
-										}
-									}
+									transformer := buildItemTransformer(opts)
 									for i := range count {
 										opts.Printer(transformer(merger.Get(i).item))
 									}
@@ -575,7 +581,7 @@ func Run(opts *Options) (int, error) {
 			break
 		}
 		if delay && reading {
-			dur := util.DurWithin(
+			dur := util.Constrain(
 				time.Duration(ticks-startTick)*coordinatorDelayStep,
 				0, coordinatorDelayMax)
 			time.Sleep(dur)
