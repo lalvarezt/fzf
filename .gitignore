@@ -12,3 +12,9 @@ fzf
 tmp
 *.patch
 .idea
+.gocache
+CLAUDE.md
+CLAUDE1.md1
+AGENTS.md
+.markdownlint-cli2.yaml
+.claude

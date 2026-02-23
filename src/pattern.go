@@ -65,6 +65,7 @@ type Pattern struct {
 	cache         *ChunkCache
 	denylist      map[int32]struct{}
 	frecencyDB    *FrecencyDB
+	startIndex    int32
 }
 
 var _splitRegex *regexp.Regexp
@@ -75,8 +76,8 @@ func init() {
 
 // BuildPattern builds Pattern object from the given arguments
 func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy bool, fuzzyAlgo algo.Algo, extended bool, caseMode Case, normalize bool, forward bool,
-	withPos bool, cacheable bool, nth []Range, delimiter Delimiter, revision revision, runes []rune, denylist map[int32]struct{}) *Pattern {
-
+	withPos bool, cacheable bool, nth []Range, delimiter Delimiter, revision revision, runes []rune, denylist map[int32]struct{}, startIndex int32,
+) *Pattern {
 	var asString string
 	if extended {
 		asString = strings.TrimLeft(string(runes), " ")
@@ -147,7 +148,9 @@ func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy boo
 		delimiter:     delimiter,
 		cache:         cache,
 		denylist:      denylist,
-		procFun:       make(map[termType]algo.Algo)}
+		startIndex:    startIndex,
+		procFun:       make(map[termType]algo.Algo),
+	}
 
 	ptr.cacheKey = ptr.buildCacheKey()
 	ptr.procFun[termFuzzy] = fuzzyAlgo
@@ -234,7 +237,8 @@ func parseTerms(fuzzy bool, caseMode Case, normalize bool, str string) []termSet
 				inv:           inv,
 				text:          textRunes,
 				caseSensitive: caseSensitive,
-				normalize:     normalizeTerm})
+				normalize:     normalizeTerm,
+			})
 			switchSet = true
 		}
 	}
@@ -302,10 +306,19 @@ func (p *Pattern) Match(chunk *Chunk, slab *util.Slab) []Result {
 func (p *Pattern) matchChunk(chunk *Chunk, space []Result, slab *util.Slab) []Result {
 	matches := []Result{}
 
+	// Skip header items in chunks that contain them
+	startIdx := 0
+	if p.startIndex > 0 && chunk.count > 0 && chunk.items[0].Index() < p.startIndex {
+		startIdx = int(p.startIndex - chunk.items[0].Index())
+		if startIdx >= chunk.count {
+			return matches
+		}
+	}
+
 	if len(p.denylist) == 0 {
 		// Huge code duplication for minimizing unnecessary map lookups
 		if space == nil {
-			for idx := 0; idx < chunk.count; idx++ {
+			for idx := startIdx; idx < chunk.count; idx++ {
 				if match, _, _ := p.MatchItem(&chunk.items[idx], p.withPos, slab); match != nil {
 					matches = append(matches, *match)
 				}
@@ -321,7 +334,7 @@ func (p *Pattern) matchChunk(chunk *Chunk, space []Result, slab *util.Slab) []Re
 	}
 
 	if space == nil {
-		for idx := 0; idx < chunk.count; idx++ {
+		for idx := startIdx; idx < chunk.count; idx++ {
 			if _, prs := p.denylist[chunk.items[idx].Index()]; prs {
 				continue
 			}

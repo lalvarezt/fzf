@@ -18,7 +18,6 @@ Reader   -> EvtReadNew        -> Matcher  (restart)
 Terminal -> EvtSearchNew:bool -> Matcher  (restart)
 Matcher  -> EvtSearchProgress -> Terminal (update info)
 Matcher  -> EvtSearchFin      -> Terminal (update list)
-Matcher  -> EvtHeader         -> Terminal (update header)
 */
 
 type revision struct {
@@ -159,14 +158,8 @@ func Run(opts *Options) (int, error) {
 	cache := NewChunkCache()
 	var chunkList *ChunkList
 	var itemIndex int32
-	header := make([]string, 0, opts.HeaderLines)
 	if opts.WithNth == nil {
 		chunkList = NewChunkList(cache, func(item *Item, data []byte) bool {
-			if len(header) < opts.HeaderLines {
-				header = append(header, byteString(data))
-				eventBox.Set(EvtHeader, header)
-				return false
-			}
 			item.text, item.colors = ansiProcessor(data)
 			item.text.Index = itemIndex
 			itemIndex++
@@ -193,11 +186,6 @@ func Run(opts *Options) (int, error) {
 				}
 			}
 			transformed := nthTransformer(tokens, itemIndex)
-			if len(header) < opts.HeaderLines {
-				header = append(header, transformed)
-				eventBox.Set(EvtHeader, header)
-				return false
-			}
 			item.text, item.colors = ansiProcessor(stringBytes(transformed))
 
 			// We should not trim trailing whitespaces with background colors
@@ -284,13 +272,15 @@ func Run(opts *Options) (int, error) {
 		denylist = make(map[int32]struct{})
 		denyMutex.Unlock()
 	}
+	headerLines := int32(opts.HeaderLines)
+	headerUpdated := false
 	patternBuilder := func(runes []rune) *Pattern {
 		denyMutex.Lock()
 		denylistCopy := maps.Clone(denylist)
 		denyMutex.Unlock()
 		pattern := BuildPattern(cache, patternCache,
 			opts.Fuzzy, opts.FuzzyAlgo, opts.Extended, opts.Case, opts.Normalize, forward, withPos,
-			opts.Filter == nil, nth, opts.Delimiter, inputRevision, runes, denylistCopy)
+			opts.Filter == nil, nth, opts.Delimiter, inputRevision, runes, denylistCopy, headerLines)
 		// Inject frecency DB reference
 		pattern.frecencyDB = frecencyDB
 		return pattern
@@ -316,6 +306,9 @@ func Run(opts *Options) (int, error) {
 				func(runes []byte) bool {
 					item := Item{}
 					if chunkList.trans(&item, runes) {
+						if item.Index() < headerLines {
+							return false
+						}
 						mutex.Lock()
 						if result, _, _ := pattern.MatchItem(&item, false, slab); result != nil {
 							opts.Printer(transformer(&item))
@@ -334,7 +327,8 @@ func Run(opts *Options) (int, error) {
 			snapshot, _, _ := chunkList.Snapshot(opts.Tail)
 			result := matcher.scan(MatchRequest{
 				chunks:  snapshot,
-				pattern: pattern})
+				pattern: pattern,
+			})
 			for i := 0; i < result.merger.Length(); i++ {
 				opts.Printer(transformer(result.merger.Get(i).item))
 				found = true
@@ -381,10 +375,11 @@ func Run(opts *Options) (int, error) {
 	query := []rune{}
 	determine := func(final bool) {
 		if heightUnknown {
-			if total >= maxFit || final {
+			items := max(0, total-int(headerLines))
+			if items >= maxFit || final {
 				deferred = false
 				heightUnknown = false
-				terminal.startChan <- fitpad{min(total, maxFit), padHeight}
+				terminal.startChan <- fitpad{min(items, maxFit), padHeight}
 			}
 		} else if deferred {
 			deferred = false
@@ -400,11 +395,11 @@ func Run(opts *Options) (int, error) {
 			clearDenylist()
 		}
 		reading = true
+		headerUpdated = false
 		startTick = ticks
 		chunkList.Clear()
 		itemIndex = 0
 		inputRevision.bumpMajor()
-		header = make([]string, 0, opts.HeaderLines)
 		readyChan := make(chan bool)
 		go reader.restart(command, environ, readyChan)
 		<-readyChan
@@ -462,7 +457,11 @@ func Run(opts *Options) (int, error) {
 						snapshotRevision = inputRevision
 					}
 					total = count
-					terminal.UpdateCount(total, !reading, value.(*string))
+					terminal.UpdateCount(max(0, total-int(headerLines)), !reading, value.(*string))
+					if headerLines > 0 && !headerUpdated {
+						terminal.UpdateHeader(GetItems(snapshot, int(headerLines)))
+						headerUpdated = int32(total) >= headerLines
+					}
 					if heightUnknown && !deferred {
 						determine(!reading)
 					}
@@ -472,6 +471,7 @@ func Run(opts *Options) (int, error) {
 					var command *commandSpec
 					var environ []string
 					var changed bool
+					headerLinesChanged := false
 					switch val := value.(type) {
 					case searchRequest:
 						sort = val.sort
@@ -490,6 +490,12 @@ func Run(opts *Options) (int, error) {
 						if val.nth != nil {
 							// Change nth and clear caches
 							nth = *val.nth
+							bump = true
+						}
+						if val.headerLines != nil {
+							headerLines = int32(*val.headerLines)
+							headerUpdated = false
+							headerLinesChanged = true
 							bump = true
 						}
 						if bump {
@@ -528,6 +534,14 @@ func Run(opts *Options) (int, error) {
 							snapshotRevision = inputRevision
 						}
 					}
+					if headerLinesChanged {
+						terminal.UpdateCount(max(0, total-int(headerLines)), !reading, nil)
+						if headerLines > 0 {
+							terminal.UpdateHeader(GetItems(snapshot, int(headerLines)))
+						} else {
+							terminal.UpdateHeader(nil)
+						}
+					}
 					matcher.Reset(snapshot, input(), true, !reading, sort, snapshotRevision)
 					delay = false
 
@@ -536,11 +550,6 @@ func Run(opts *Options) (int, error) {
 					case float32:
 						terminal.UpdateProgress(val)
 					}
-
-				case EvtHeader:
-					headerPadded := make([]string, opts.HeaderLines)
-					copy(headerPadded, value.([]string))
-					terminal.UpdateHeader(headerPadded)
 
 				case EvtSearchFin:
 					switch val := value.(type) {

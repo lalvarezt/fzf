@@ -314,6 +314,7 @@ type Terminal struct {
 	sort                 bool
 	toggleSort           bool
 	track                trackOption
+	targetIndex          int32
 	delimiter            Delimiter
 	expect               map[tui.Event]string
 	keymap               map[tui.Event][]*action
@@ -327,7 +328,7 @@ type Terminal struct {
 	headerVisible        bool
 	headerFirst          bool
 	headerLines          int
-	header               []string
+	header               []Item
 	header0              []string
 	footer               []string
 	ellipsis             string
@@ -543,6 +544,7 @@ const (
 	actChangeBorderLabel
 	actChangeGhost
 	actChangeHeader
+	actChangeHeaderLines
 	actChangeFooter
 	actChangeHeaderLabel
 	actChangeFooterLabel
@@ -628,6 +630,7 @@ const (
 	actTransformBorderLabel
 	actTransformGhost
 	actTransformHeader
+	actTransformHeaderLines
 	actTransformFooter
 	actTransformHeaderLabel
 	actTransformFooterLabel
@@ -646,6 +649,7 @@ const (
 	actBgTransformBorderLabel
 	actBgTransformGhost
 	actBgTransformHeader
+	actBgTransformHeaderLines
 	actBgTransformFooter
 	actBgTransformHeaderLabel
 	actBgTransformFooterLabel
@@ -714,6 +718,7 @@ func processExecution(action actionType) bool {
 		actTransformBorderLabel,
 		actTransformGhost,
 		actTransformHeader,
+		actTransformHeaderLines,
 		actTransformFooter,
 		actTransformHeaderLabel,
 		actTransformFooterLabel,
@@ -729,6 +734,7 @@ func processExecution(action actionType) bool {
 		actBgTransformBorderLabel,
 		actBgTransformGhost,
 		actBgTransformHeader,
+		actBgTransformHeaderLines,
 		actBgTransformFooter,
 		actBgTransformHeaderLabel,
 		actBgTransformFooterLabel,
@@ -765,14 +771,15 @@ type placeholderFlags struct {
 }
 
 type searchRequest struct {
-	sort     bool
-	sync     bool
-	nth      *[]Range
-	command  *commandSpec
-	environ  []string
-	changed  bool
-	denylist []int32
-	revision revision
+	sort        bool
+	sync        bool
+	nth         *[]Range
+	headerLines *int
+	command     *commandSpec
+	environ     []string
+	changed     bool
+	denylist    []int32
+	revision    revision
 }
 
 type previewRequest struct {
@@ -1026,6 +1033,7 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 		sort:               opts.Sort > 0,
 		toggleSort:         opts.ToggleSort,
 		track:              opts.Track,
+		targetIndex:        minItem.Index(),
 		delimiter:          opts.Delimiter,
 		expect:             opts.Expect,
 		keymap:             opts.Keymap,
@@ -1067,7 +1075,7 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 		headerFirst:        opts.HeaderFirst,
 		headerLines:        opts.HeaderLines,
 		gap:                opts.Gap,
-		header:             []string{},
+		header:             []Item{},
 		footer:             opts.Footer,
 		header0:            opts.Header,
 		ansi:               opts.Ansi,
@@ -1368,7 +1376,7 @@ func (t *Terminal) environImpl(forPreview bool) []string {
 		}
 	}
 	env = append(env, "FZF_INPUT_STATE="+inputState)
-	env = append(env, fmt.Sprintf("FZF_TOTAL_COUNT=%d", t.count))
+	env = append(env, fmt.Sprintf("FZF_TOTAL_COUNT=%d", max(0, t.count-t.headerLines)))
 	env = append(env, fmt.Sprintf("FZF_MATCH_COUNT=%d", t.resultMerger.Length()))
 	env = append(env, fmt.Sprintf("FZF_SELECT_COUNT=%d", len(t.selected)))
 	env = append(env, fmt.Sprintf("FZF_LINES=%d", t.areaLines))
@@ -1759,8 +1767,14 @@ func (t *Terminal) changeFooter(footer string) {
 }
 
 // UpdateHeader updates the header
-func (t *Terminal) UpdateHeader(header []string) {
+func (t *Terminal) UpdateHeader(header []Item) {
 	t.mutex.Lock()
+	// Pad to t.headerLines so that click coordinate mapping works correctly
+	if len(header) < t.headerLines {
+		padded := make([]Item, t.headerLines)
+		copy(padded, header)
+		header = padded
+	}
 	t.header = header
 	t.mutex.Unlock()
 	t.reqBox.Set(reqHeader, nil)
@@ -1791,6 +1805,10 @@ func (t *Terminal) UpdateList(result MatchResult) {
 		} else if merger.Length() > 0 {
 			prevIndex = merger.First().item.Index()
 		}
+	}
+	if t.targetIndex != minItem.Index() {
+		prevIndex = t.targetIndex
+		t.targetIndex = minItem.Index()
 	}
 	t.progress = 100
 	t.merger = merger
@@ -3093,11 +3111,11 @@ func (t *Terminal) printHeader() {
 	}
 
 	t.withWindow(t.headerWindow, func() {
-		var lines []string
+		var headerItems []Item
 		if !t.hasHeaderLinesWindow() {
-			lines = t.header
+			headerItems = t.header
 		}
-		t.printHeaderImpl(t.headerWindow, t.headerBorderShape, t.header0, lines)
+		t.printHeaderImpl(t.headerWindow, t.headerBorderShape, t.header0, headerItems)
 	})
 	if w, shape := t.determineHeaderLinesShape(); w {
 		t.withWindow(t.headerLinesWindow, func() {
@@ -3159,7 +3177,7 @@ func (t *Terminal) headerIndentImpl(base int, borderShape tui.BorderShape) int {
 	return indentSize
 }
 
-func (t *Terminal) printHeaderImpl(window tui.Window, borderShape tui.BorderShape, lines1 []string, lines2 []string) {
+func (t *Terminal) printHeaderImpl(window tui.Window, borderShape tui.BorderShape, lines1 []string, lines2 []Item) {
 	max := t.window.Height()
 	if !t.inputless && t.inputWindow == nil && window == nil && t.headerFirst {
 		max--
@@ -3186,7 +3204,8 @@ func (t *Terminal) printHeaderImpl(window tui.Window, borderShape tui.BorderShap
 	}
 	indent := strings.Repeat(" ", indentSize)
 	t.wrap = false
-	for idx, lineStr := range append(append([]string{}, lines1...), lines2...) {
+	totalLines := len(lines1) + len(lines2)
+	for idx := 0; idx < totalLines; idx++ {
 		line := idx
 		if needReverse && idx < len(lines1) {
 			line = len(lines1) - idx - 1
@@ -3200,11 +3219,18 @@ func (t *Terminal) printHeaderImpl(window tui.Window, borderShape tui.BorderShap
 		if line >= max {
 			continue
 		}
-		trimmed, colors, newState := extractColor(lineStr, state, nil)
-		state = newState
-		item := &Item{
-			text:   util.ToChars([]byte(trimmed)),
-			colors: colors}
+
+		var item *Item
+		if idx < len(lines1) {
+			trimmed, colors, newState := extractColor(lines1[idx], state, nil)
+			state = newState
+			item = &Item{
+				text:   util.ToChars([]byte(trimmed)),
+				colors: colors}
+		} else {
+			headerItem := lines2[idx-len(lines1)]
+			item = &headerItem
+		}
 
 		t.printHighlighted(Result{item: item},
 			tui.ColHeader, tui.ColHeader, false, false, false, line, line, true,
@@ -5302,9 +5328,13 @@ func (t *Terminal) addClickHeaderWord(env []string) []string {
 		return env
 	}
 
-	// NOTE: t.header is padded with empty strings so that its size is equal to t.headerLines
 	nthBase := 0
-	headers := [2][]string{t.header, t.header0}
+	// Convert header items to strings for click handling
+	headerStrs := make([]string, len(t.header))
+	for i, item := range t.header {
+		headerStrs[i] = item.text.ToString()
+	}
+	headers := [2][]string{headerStrs, t.header0}
 	if t.layout == layoutReverse {
 		headers[0], headers[1] = headers[1], headers[0]
 	}
@@ -5906,6 +5936,7 @@ func (t *Terminal) Loop() error {
 	events := []util.EventType{}
 	changed := false
 	var newNth *[]Range
+	var newHeaderLines *int
 	req := func(evts ...util.EventType) {
 		for _, event := range evts {
 			events = append(events, event)
@@ -5922,6 +5953,7 @@ func (t *Terminal) Loop() error {
 		events = []util.EventType{}
 		changed = false
 		newNth = nil
+		newHeaderLines = nil
 		beof := false
 		queryChanged := false
 		denylist := []int32{}
@@ -6288,6 +6320,23 @@ func (t *Terminal) Loop() error {
 				}
 			case actPrintQuery:
 				req(reqPrintQuery)
+			case actChangeHeaderLines, actTransformHeaderLines, actBgTransformHeaderLines:
+				capture(true, func(expr string) {
+					if n, err := strconv.Atoi(expr); err == nil && n >= 0 && n != t.headerLines {
+						t.headerLines = n
+						newHeaderLines = &n
+						changed = true
+						// Deselect items that are now part of the header
+						for idx := range t.selected {
+							if idx < int32(n) {
+								delete(t.selected, idx)
+							}
+						}
+						// Tell UpdateList to reposition cursor to the current item
+						t.targetIndex = t.currentIndex()
+						req(reqList, reqPrompt, reqInfo, reqHeader)
+					}
+				})
 			case actChangeMulti:
 				multi := t.multi
 				if a.a == "" {
@@ -7469,7 +7518,7 @@ func (t *Terminal) Loop() error {
 		reload := changed || newCommand != nil
 		var reloadRequest *searchRequest
 		if reload {
-			reloadRequest = &searchRequest{sort: t.sort, sync: reloadSync, nth: newNth, command: newCommand, environ: t.environ(), changed: changed, denylist: denylist, revision: t.resultMerger.Revision()}
+			reloadRequest = &searchRequest{sort: t.sort, sync: reloadSync, nth: newNth, headerLines: newHeaderLines, command: newCommand, environ: t.environ(), changed: changed, denylist: denylist, revision: t.resultMerger.Revision()}
 		}
 
 		// Dispatch queued background requests

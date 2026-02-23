@@ -30,10 +30,6 @@ Style/OptionalBooleanParameter:
   Enabled: false
 Style/WordArray:
   MinSize: 1
-Minitest/AssertEqual:
-  Enabled: false
-Minitest/EmptyLineBeforeAssertionMethods:
-  Enabled: false
 Naming/VariableNumber:
   Enabled: false
 Lint/EmptyBlock:
