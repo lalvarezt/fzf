@@ -340,6 +340,9 @@ type Terminal struct {
 	nthAttr              tui.Attr
 	nth                  []Range
 	nthCurrent           []Range
+	withNthDefault       string
+	withNthExpr          string
+	withNthEnabled       bool
 	acceptNth            func([]Token, int32) string
 	tabstop              int
 	margin               [4]sizeSpec
@@ -384,6 +387,7 @@ type Terminal struct {
 	hasLoadActions       bool
 	hasResizeActions     bool
 	triggerLoad          bool
+	filterSelection      bool
 	reading              bool
 	running              *util.AtomicBool
 	failed               *string
@@ -552,6 +556,7 @@ const (
 	actChangeListLabel
 	actChangeMulti
 	actChangeNth
+	actChangeWithNth
 	actChangePointer
 	actChangePreview
 	actChangePreviewLabel
@@ -637,6 +642,7 @@ const (
 	actTransformInputLabel
 	actTransformListLabel
 	actTransformNth
+	actTransformWithNth
 	actTransformPointer
 	actTransformPreviewLabel
 	actTransformPrompt
@@ -656,6 +662,7 @@ const (
 	actBgTransformInputLabel
 	actBgTransformListLabel
 	actBgTransformNth
+	actBgTransformWithNth
 	actBgTransformPointer
 	actBgTransformPreviewLabel
 	actBgTransformPrompt
@@ -725,6 +732,7 @@ func processExecution(action actionType) bool {
 		actTransformInputLabel,
 		actTransformListLabel,
 		actTransformNth,
+		actTransformWithNth,
 		actTransformPointer,
 		actTransformPreviewLabel,
 		actTransformPrompt,
@@ -741,6 +749,7 @@ func processExecution(action actionType) bool {
 		actBgTransformInputLabel,
 		actBgTransformListLabel,
 		actBgTransformNth,
+		actBgTransformWithNth,
 		actBgTransformPointer,
 		actBgTransformPreviewLabel,
 		actBgTransformPrompt,
@@ -770,10 +779,15 @@ type placeholderFlags struct {
 	raw           bool
 }
 
+type withNthSpec struct {
+	fn func([]Token, int32) string // nil = clear (restore original)
+}
+
 type searchRequest struct {
 	sort        bool
 	sync        bool
 	nth         *[]Range
+	withNth     *withNthSpec
 	headerLines *int
 	command     *commandSpec
 	environ     []string
@@ -1084,6 +1098,9 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 		nthAttr:            opts.Theme.Nth.Attr,
 		nth:                opts.Nth,
 		nthCurrent:         opts.Nth,
+		withNthDefault:     opts.WithNthExpr,
+		withNthExpr:        opts.WithNthExpr,
+		withNthEnabled:     opts.WithNth != nil,
 		tabstop:            opts.Tabstop,
 		raw:                opts.Raw,
 		hasStartActions:    false,
@@ -1355,6 +1372,9 @@ func (t *Terminal) environImpl(forPreview bool) []string {
 	if len(t.nthCurrent) > 0 {
 		env = append(env, "FZF_NTH="+RangesToString(t.nthCurrent))
 	}
+	if len(t.withNthExpr) > 0 {
+		env = append(env, "FZF_WITH_NTH="+t.withNthExpr)
+	}
 	if t.raw {
 		val := "0"
 		if t.isCurrentItemMatch() {
@@ -1376,7 +1396,7 @@ func (t *Terminal) environImpl(forPreview bool) []string {
 		}
 	}
 	env = append(env, "FZF_INPUT_STATE="+inputState)
-	env = append(env, fmt.Sprintf("FZF_TOTAL_COUNT=%d", max(0, t.count-t.headerLines)))
+	env = append(env, fmt.Sprintf("FZF_TOTAL_COUNT=%d", t.count))
 	env = append(env, fmt.Sprintf("FZF_MATCH_COUNT=%d", t.resultMerger.Length()))
 	env = append(env, fmt.Sprintf("FZF_SELECT_COUNT=%d", len(t.selected)))
 	env = append(env, fmt.Sprintf("FZF_LINES=%d", t.areaLines))
@@ -1724,6 +1744,17 @@ func (t *Terminal) Input() (bool, []rune) {
 	return paused, copySlice(src)
 }
 
+// PauseRendering blocks the terminal from reading items.
+// Must be paired with ResumeRendering.
+func (t *Terminal) PauseRendering() {
+	t.mutex.Lock()
+}
+
+// ResumeRendering releases the lock acquired by PauseRendering.
+func (t *Terminal) ResumeRendering() {
+	t.mutex.Unlock()
+}
+
 // UpdateCount updates the count information
 func (t *Terminal) UpdateCount(cnt int, final bool, failedCommand *string) {
 	t.mutex.Lock()
@@ -1846,6 +1877,21 @@ func (t *Terminal) UpdateList(result MatchResult) {
 		}
 		t.revision = newRevision
 		t.version++
+
+		// Filter out selections that no longer match after with-nth change.
+		// Must be inside the revision check so we don't consume the flag
+		// on a stale EvtSearchFin from a previous search.
+		if t.filterSelection && t.multi > 0 && len(t.selected) > 0 {
+			matchMap := t.resultMerger.ToMap()
+			filtered := make(map[int32]selectedItem)
+			for k, v := range t.selected {
+				if _, matched := matchMap[k]; matched {
+					filtered[k] = v
+				}
+			}
+			t.selected = filtered
+		}
+		t.filterSelection = false
 	}
 	if t.triggerLoad {
 		t.triggerLoad = false
@@ -5936,6 +5982,7 @@ func (t *Terminal) Loop() error {
 	events := []util.EventType{}
 	changed := false
 	var newNth *[]Range
+	var newWithNth *withNthSpec
 	var newHeaderLines *int
 	req := func(evts ...util.EventType) {
 		for _, event := range evts {
@@ -5953,6 +6000,7 @@ func (t *Terminal) Loop() error {
 		events = []util.EventType{}
 		changed = false
 		newNth = nil
+		newWithNth = nil
 		newHeaderLines = nil
 		beof := false
 		queryChanged := false
@@ -6368,6 +6416,33 @@ func (t *Terminal) Loop() error {
 					if !compareRanges(t.nthCurrent, *newNth) {
 						changed = true
 						t.nthCurrent = *newNth
+						t.forceRerenderList()
+					}
+				})
+			case actChangeWithNth, actTransformWithNth, actBgTransformWithNth:
+				if !t.withNthEnabled {
+					break Action
+				}
+				capture(true, func(expr string) {
+					tokens := strings.Split(expr, "|")
+					withNthExpr := tokens[0]
+					if len(tokens) > 1 {
+						a.a = strings.Join(append(tokens[1:], tokens[0]), "|")
+					}
+					// Empty value restores the default --with-nth
+					if len(withNthExpr) == 0 {
+						withNthExpr = t.withNthDefault
+					}
+					if withNthExpr != t.withNthExpr {
+						if factory, err := nthTransformer(withNthExpr); err == nil {
+							newWithNth = &withNthSpec{fn: factory(t.delimiter)}
+						} else {
+							return
+						}
+						t.withNthExpr = withNthExpr
+						t.filterSelection = true
+						changed = true
+						t.clearNumLinesCache()
 						t.forceRerenderList()
 					}
 				})
@@ -7518,7 +7593,7 @@ func (t *Terminal) Loop() error {
 		reload := changed || newCommand != nil
 		var reloadRequest *searchRequest
 		if reload {
-			reloadRequest = &searchRequest{sort: t.sort, sync: reloadSync, nth: newNth, headerLines: newHeaderLines, command: newCommand, environ: t.environ(), changed: changed, denylist: denylist, revision: t.resultMerger.Revision()}
+			reloadRequest = &searchRequest{sort: t.sort, sync: reloadSync, nth: newNth, withNth: newWithNth, headerLines: newHeaderLines, command: newCommand, environ: t.environ(), changed: changed, denylist: denylist, revision: t.resultMerger.Revision()}
 		}
 
 		// Dispatch queued background requests
