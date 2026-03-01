@@ -13,12 +13,14 @@ type transformed struct {
 	tokens   []Token
 }
 
-// Item represents each input line. 56 bytes.
+// Item represents each input line. 64 bytes.
 type Item struct {
-	text        util.Chars    // 32 = 24 + 1 + 1 + 2 + 4
-	transformed *transformed  // 8
-	origText    *[]byte       // 8
-	colors      *[]ansiOffset // 8
+	text          util.Chars    // 32 = 24 + 1 + 1 + 2 + 4
+	transformed   *transformed  // 8
+	origText      *[]byte       // 8
+	colors        *[]ansiOffset // 8
+	frecencyGen   uint32
+	frecencyScore uint16
 }
 
 // Index returns ordinal index of the Item

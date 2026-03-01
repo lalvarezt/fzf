@@ -573,6 +573,9 @@ func Run(opts *Options) (int, error) {
 							}, func() {
 								nthTransformer = newTransformer
 							})
+							if frecencyDB != nil {
+								frecencyDB.InvalidateItemScoreCache()
+							}
 							terminal.ResumeRendering()
 							matcher.ResumeScan()
 							withNthChanged = true

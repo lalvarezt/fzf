@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,7 +24,8 @@ type FrecencyEntry struct {
 // FrecencyDB manages the frecency database
 type FrecencyDB struct {
 	entries        map[string]*FrecencyEntry
-	scores         sync.Map  // Cached scaled scores for fast lookup
+	scores         sync.Map // Cached scaled scores (string -> uint16)
+	scoreGen       atomic.Uint32
 	sessionTime    time.Time // Frozen time at startup for consistent relative ordering during session
 	path           string
 	mutex          sync.RWMutex
@@ -37,7 +39,8 @@ type FrecencyDB struct {
 // Frecency scoring uses frequency, recency, and momentum to rank items.
 //
 // Raw score formula:
-//   rawScore = log₂(frequency + 1) × 0.5^(age/halfLife) × momentum
+//
+//	rawScore = log₂(frequency + 1) × 0.5^(age/halfLife) × momentum
 //
 // Components:
 //   - Frequency: log₂ provides logarithmic growth - each doubling adds ~1 to score
@@ -50,24 +53,27 @@ type FrecencyDB struct {
 //   - After 3 months: 12.5% of original weight
 //
 // Scaling to uint16 range [0, 65535]:
-//   scaledScore = min(rawScore × scaleFactor, 65535)
+//
+//	scaledScore = min(rawScore × scaleFactor, 65535)
 //
 // Default scale factor (3150) optimized for max frequency ~15,000 (5-10 years of power user):
-//   maxRaw = log₂(15,001) × 1.0 × 1.5 ≈ 20.81
-//   scaleFactor = 65,535 / 20.81 ≈ 3,150
+//
+//	maxRaw = log₂(15,001) × 1.0 × 1.5 ≈ 20.81
+//	scaleFactor = 65,535 / 20.81 ≈ 3,150
 //
 // Score distribution with default parameters (scaleFactor=3150, halfLife=30d, momentumBoost=0.5):
-//   | Frequency | Age  | Momentum | Raw Score | Scaled | % uint16 |
-//   |-----------|------|----------|-----------|--------|----------|
-//   | 15,000    | 0d   | 1.5      | 20.81     | 65,535 | 100.0%   |
-//   | 10,000    | 0d   | 1.5      | 19.94     | 62,811 |  95.8%   |
-//   | 10,000    | 30d  | 1.0      |  6.64     | 20,916 |  31.9%   |
-//   |  2,000    | 0d   | 1.5      | 16.47     | 51,881 |  79.2%   |
-//   |  2,000    | 30d  | 1.0      |  5.49     | 17,294 |  26.4%   |
-//   |    500    | 0d   | 1.5      | 13.47     | 42,431 |  64.7%   |
-//   |    500    | 30d  | 1.0      |  4.49     | 14,144 |  21.6%   |
-//   |     10    | 0d   | 1.0      |  3.46     | 10,899 |  16.6%   |
-//   |     10    | 30d  | 1.0      |  1.73     |  5,450 |   8.3%   |
+//
+//	| Frequency | Age  | Momentum | Raw Score | Scaled | % uint16 |
+//	|-----------|------|----------|-----------|--------|----------|
+//	| 15,000    | 0d   | 1.5      | 20.81     | 65,535 | 100.0%   |
+//	| 10,000    | 0d   | 1.5      | 19.94     | 62,811 |  95.8%   |
+//	| 10,000    | 30d  | 1.0      |  6.64     | 20,916 |  31.9%   |
+//	|  2,000    | 0d   | 1.5      | 16.47     | 51,881 |  79.2%   |
+//	|  2,000    | 30d  | 1.0      |  5.49     | 17,294 |  26.4%   |
+//	|    500    | 0d   | 1.5      | 13.47     | 42,431 |  64.7%   |
+//	|    500    | 30d  | 1.0      |  4.49     | 14,144 |  21.6%   |
+//	|     10    | 0d   | 1.0      |  3.46     | 10,899 |  16.6%   |
+//	|     10    | 30d  | 1.0      |  1.73     |  5,450 |   8.3%   |
 //
 // This provides excellent uint16 range utilization (80-100% for active users)
 // while maintaining good score separation across all frequency levels.
@@ -86,7 +92,7 @@ func NewFrecencyDB(customPath string, scaleFactor float64, halfLife, momentumWin
 		}
 	}
 
-	return &FrecencyDB{
+	db := &FrecencyDB{
 		entries:        make(map[string]*FrecencyEntry),
 		scores:         sync.Map{},
 		sessionTime:    time.Now(),
@@ -97,6 +103,8 @@ func NewFrecencyDB(customPath string, scaleFactor float64, halfLife, momentumWin
 		momentumWindow: momentumWindow,
 		momentumBoost:  momentumBoost,
 	}
+	db.scoreGen.Store(1)
+	return db
 }
 
 // getDefaultFrecencyPath returns the default platform-specific path for the frecency database
@@ -152,6 +160,7 @@ func (db *FrecencyDB) Load() error {
 	}
 
 	db.mutex.Unlock()
+	db.InvalidateItemScoreCache()
 	return nil
 }
 
@@ -221,7 +230,7 @@ func (db *FrecencyDB) Save() error {
 // Applies linear scaling: scaledScore = min(rawScore × scaleFactor, 65535)
 func (db *FrecencyDB) calculateAndStoreScore(item string, entry *FrecencyEntry) {
 	rawScore, _, _, _ := db.scoreComponents(entry, db.sessionTime)
-	scaledScore := math.Min(rawScore*db.scaleFactor, 65535)
+	scaledScore := uint16(math.Min(rawScore*db.scaleFactor, 65535))
 	db.scores.Store(item, scaledScore)
 }
 
@@ -264,14 +273,33 @@ func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw,
 	return raw, freqComponent, decayComponent, momentumComponent
 }
 
-// GetScore returns the pre-calculated and scaled frecency score for an item
-// Returns a value in [0, 65535] range ready for uint16 casting in sort criteria
-// Returns 0.0 if the item has never been selected
-func (db *FrecencyDB) GetScore(item string) float64 {
+// GetScore returns the pre-calculated and scaled frecency score for an item.
+// Returns 0 if the item has never been selected.
+func (db *FrecencyDB) GetScore(item string) uint16 {
 	if score, ok := db.scores.Load(item); ok {
-		return score.(float64)
+		return score.(uint16)
 	}
-	return 0.0
+	return 0
+}
+
+// InvalidateItemScoreCache invalidates per-item score cache entries.
+// Call this when item.text can change (e.g. change-with-nth) or when
+// frecency scores are updated.
+func (db *FrecencyDB) InvalidateItemScoreCache() {
+	db.scoreGen.Add(1)
+}
+
+// GetScoreForItem returns a cached frecency score for an item.
+// It avoids repeated item.text.ToString() conversion across rescans.
+func (db *FrecencyDB) GetScoreForItem(item *Item) uint16 {
+	generation := db.scoreGen.Load()
+	if item.frecencyGen == generation {
+		return item.frecencyScore
+	}
+	score := db.GetScore(item.text.ToString())
+	item.frecencyGen = generation
+	item.frecencyScore = score
+	return score
 }
 
 // Update increments the frequency counter and updates the timestamp for an item
@@ -305,6 +333,7 @@ func (db *FrecencyDB) Update(item string) {
 	// Recalculate score for this item using frozen sessionTime
 	db.calculateAndStoreScore(item, entry)
 	db.dirty = true
+	db.InvalidateItemScoreCache()
 }
 
 // Buff increments the frequency counter for an item
@@ -335,6 +364,7 @@ func (db *FrecencyDB) Buff(item string) {
 	// Recalculate score for this item using frozen sessionTime
 	db.calculateAndStoreScore(item, entry)
 	db.dirty = true
+	db.InvalidateItemScoreCache()
 }
 
 // Nerf decrements the frequency counter for an item
@@ -364,6 +394,7 @@ func (db *FrecencyDB) Nerf(item string) {
 	}
 
 	db.dirty = true
+	db.InvalidateItemScoreCache()
 }
 
 // Remove deletes an entry from the frecency database
@@ -380,6 +411,7 @@ func (db *FrecencyDB) Remove(item string) {
 	delete(db.entries, item)
 	db.scores.Delete(item)
 	db.dirty = true
+	db.InvalidateItemScoreCache()
 }
 
 // copyFile copies a file from src to dst

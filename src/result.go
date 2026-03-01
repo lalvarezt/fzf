@@ -112,8 +112,7 @@ func buildResultFromBounds(item *Item, score int, minBegin, minEnd, maxEnd int, 
 		case byFrecency:
 			if frecencyDB != nil {
 				// Higher is better
-				frecencyScore := frecencyDB.GetScore(item.text.ToString())
-				val = math.MaxUint16 - uint16(frecencyScore)
+				val = math.MaxUint16 - frecencyDB.GetScoreForItem(item)
 			}
 		}
 		result.points[3-idx] = val
