@@ -346,7 +346,7 @@ func (p *Pattern) matchChunk(chunk *Chunk, space []Result, slab *util.Slab) []Re
 				if res.Start >= 0 {
 					matches = append(matches, buildResultFromBounds(
 						&chunk.items[idx], res.Score,
-						int(res.Start), int(res.End), int(res.End), true))
+						int(res.Start), int(res.End), int(res.End), true, p.frecencyDB))
 				}
 			}
 		} else {
@@ -356,7 +356,7 @@ func (p *Pattern) matchChunk(chunk *Chunk, space []Result, slab *util.Slab) []Re
 				if res.Start >= 0 {
 					matches = append(matches, buildResultFromBounds(
 						result.item, res.Score,
-						int(res.Start), int(res.End), int(res.End), true))
+						int(res.Start), int(res.End), int(res.End), true, p.frecencyDB))
 				}
 			}
 		}

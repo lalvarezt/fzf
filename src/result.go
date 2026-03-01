@@ -47,11 +47,11 @@ func buildResult(item *Item, offsets []Offset, score int, frecencyDB *FrecencyDB
 		}
 	}
 
-	return buildResultFromBounds(item, score, minBegin, minEnd, maxEnd, validOffsetFound)
+	return buildResultFromBounds(item, score, minBegin, minEnd, maxEnd, validOffsetFound, frecencyDB)
 }
 
 // buildResultFromBounds builds a Result from pre-computed offset bounds.
-func buildResultFromBounds(item *Item, score int, minBegin, minEnd, maxEnd int, validOffsetFound bool) Result {
+func buildResultFromBounds(item *Item, score int, minBegin, minEnd, maxEnd int, validOffsetFound bool, frecencyDB *FrecencyDB) Result {
 	result := Result{item: item}
 	numChars := item.text.Length()
 
