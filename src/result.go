@@ -133,7 +133,7 @@ func minRank() Result {
 	return Result{item: &minItem, points: [4]uint16{math.MaxUint16, 0, 0, 0}}
 }
 
-func (result *Result) colorOffsets(matchOffsets []Offset, nthOffsets []Offset, theme *tui.ColorTheme, colBase tui.ColorPair, colMatch tui.ColorPair, attrNth tui.Attr, hidden bool) []colorOffset {
+func (result *Result) colorOffsets(matchOffsets []Offset, nthOffsets []Offset, theme *tui.ColorTheme, colBase tui.ColorPair, colMatch tui.ColorPair, attrNth tui.Attr, nthOverlay tui.Attr, hidden bool) []colorOffset {
 	itemColors := result.item.Colors()
 
 	// No ANSI codes
@@ -218,6 +218,10 @@ func (result *Result) colorOffsets(matchOffsets []Offset, nthOffsets []Offset, t
 		}
 		return tui.NewColorPair(fg, bg, ansi.color.attr).WithUl(ansi.color.ul).MergeAttr(base)
 	}
+	fgAttr := tui.ColNormal.Attr()
+	nthAttrFinal := fgAttr.Merge(attrNth).Merge(nthOverlay)
+	nthBase := colBase.WithNewAttr(nthAttrFinal)
+
 	var colors []colorOffset
 	add := func(idx int) {
 		if curr.fbg >= 0 {
@@ -231,7 +235,7 @@ func (result *Result) colorOffsets(matchOffsets []Offset, nthOffsets []Offset, t
 			if curr.match {
 				var color tui.ColorPair
 				if curr.nth {
-					color = colBase.WithAttr(attrNth).Merge(colMatch)
+					color = nthBase.Merge(colMatch)
 				} else {
 					color = colBase.Merge(colMatch)
 				}
@@ -251,7 +255,7 @@ func (result *Result) colorOffsets(matchOffsets []Offset, nthOffsets []Offset, t
 					if color.Fg().IsDefault() && origColor.HasBg() {
 						color = origColor
 						if curr.nth {
-							color = color.WithAttr(attrNth &^ tui.AttrRegular)
+							color = color.WithAttr((attrNth &^ tui.AttrRegular).Merge(nthOverlay))
 						}
 					} else {
 						color = origColor.MergeNonDefault(color)
@@ -263,7 +267,7 @@ func (result *Result) colorOffsets(matchOffsets []Offset, nthOffsets []Offset, t
 				ansi := itemColors[curr.index]
 				base := colBase
 				if curr.nth {
-					base = base.WithAttr(attrNth)
+					base = nthBase
 				}
 				if hidden {
 					base = base.WithFg(theme.Nomatch)
@@ -275,7 +279,7 @@ func (result *Result) colorOffsets(matchOffsets []Offset, nthOffsets []Offset, t
 					match:  false,
 					url:    ansi.color.url})
 			} else {
-				color := colBase.WithAttr(attrNth)
+				color := nthBase
 				if hidden {
 					color = color.WithFg(theme.Nomatch)
 				}
