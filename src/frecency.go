@@ -25,15 +25,22 @@ type FrecencyEntry struct {
 type FrecencyDB struct {
 	entries        map[string]*FrecencyEntry
 	scores         sync.Map // Cached scaled scores (string -> uint16)
+	itemScores     sync.Map // Cached per-item scores (*Item -> cachedItemScore)
 	scoreGen       atomic.Uint32
 	sessionTime    time.Time // Frozen time at startup for consistent relative ordering during session
 	path           string
 	mutex          sync.RWMutex
 	dirty          bool
+	stripAnsi      bool
 	scaleFactor    float64
 	halfLife       time.Duration
 	momentumWindow time.Duration
 	momentumBoost  float64
+}
+
+type cachedItemScore struct {
+	generation uint32
+	score      uint16
 }
 
 // Frecency scoring uses frequency, recency, and momentum to rank items.
@@ -289,17 +296,31 @@ func (db *FrecencyDB) InvalidateItemScoreCache() {
 	db.scoreGen.Add(1)
 }
 
+func (db *FrecencyDB) keyForItem(item *Item) string {
+	if item == nil {
+		return ""
+	}
+	return item.AsString(db.stripAnsi)
+}
+
 // GetScoreForItem returns a cached frecency score for an item.
 // It avoids repeated item.text.ToString() conversion across rescans.
 func (db *FrecencyDB) GetScoreForItem(item *Item) uint16 {
 	generation := db.scoreGen.Load()
-	if item.frecencyGen == generation {
-		return item.frecencyScore
+	if cached, ok := db.itemScores.Load(item); ok {
+		itemScore := cached.(cachedItemScore)
+		if itemScore.generation == generation {
+			return itemScore.score
+		}
 	}
-	score := db.GetScore(item.text.ToString())
-	item.frecencyGen = generation
-	item.frecencyScore = score
+	score := db.GetScore(db.keyForItem(item))
+	db.itemScores.Store(item, cachedItemScore{generation: generation, score: score})
 	return score
+}
+
+// UpdateItem increments the frequency counter and updates the timestamp for an item.
+func (db *FrecencyDB) UpdateItem(item *Item) {
+	db.Update(db.keyForItem(item))
 }
 
 // Update increments the frequency counter and updates the timestamp for an item
@@ -326,7 +347,6 @@ func (db *FrecencyDB) Update(item string) {
 			Frequency:   1,
 			FirstAccess: now,
 			LastAccess:  now,
-			PrevAccess:  now,
 		}
 		db.entries[item] = entry
 	}
@@ -334,6 +354,11 @@ func (db *FrecencyDB) Update(item string) {
 	db.calculateAndStoreScore(item, entry)
 	db.dirty = true
 	db.InvalidateItemScoreCache()
+}
+
+// BuffItem increments the frequency counter for an item.
+func (db *FrecencyDB) BuffItem(item *Item) {
+	db.Buff(db.keyForItem(item))
 }
 
 // Buff increments the frequency counter for an item
@@ -356,7 +381,6 @@ func (db *FrecencyDB) Buff(item string) {
 			Frequency:   1,
 			FirstAccess: now,
 			LastAccess:  now,
-			PrevAccess:  now,
 		}
 		db.entries[item] = entry
 	}
@@ -365,6 +389,11 @@ func (db *FrecencyDB) Buff(item string) {
 	db.calculateAndStoreScore(item, entry)
 	db.dirty = true
 	db.InvalidateItemScoreCache()
+}
+
+// NerfItem decrements the frequency counter for an item.
+func (db *FrecencyDB) NerfItem(item *Item) {
+	db.Nerf(db.keyForItem(item))
 }
 
 // Nerf decrements the frequency counter for an item
@@ -395,6 +424,11 @@ func (db *FrecencyDB) Nerf(item string) {
 
 	db.dirty = true
 	db.InvalidateItemScoreCache()
+}
+
+// RemoveItem deletes an entry for an item from the frecency database.
+func (db *FrecencyDB) RemoveItem(item *Item) {
+	db.Remove(db.keyForItem(item))
 }
 
 // Remove deletes an entry from the frecency database

@@ -1965,8 +1965,7 @@ func (t *Terminal) output() bool {
 		if current != nil {
 			// Update frecency for current item
 			if t.frecencyDB != nil {
-				t.frecencyDB.Update(current.AsString(t.ansi))
-				t.frecencyDB.dirty = true
+				t.frecencyDB.UpdateItem(current)
 			}
 			t.printer(transform(current))
 			found = true
@@ -1975,8 +1974,7 @@ func (t *Terminal) output() bool {
 		for _, sel := range t.sortSelected() {
 			// Update frecency for each selected item
 			if t.frecencyDB != nil {
-				t.frecencyDB.Update(sel.item.AsString(t.ansi))
-				t.frecencyDB.dirty = true
+				t.frecencyDB.UpdateItem(sel.item)
 			}
 			t.printer(transform(sel.item))
 		}
@@ -6222,8 +6220,7 @@ func (t *Terminal) Loop() error {
 			case actFrecencyEntryBuff:
 				if t.frecencyDB != nil {
 					if item := t.currentItem(); item != nil {
-						itemStr := item.AsString(t.ansi)
-						t.frecencyDB.Buff(itemStr)
+						t.frecencyDB.BuffItem(item)
 						t.frecencyDB.Save()
 						changed = true
 					}
@@ -6231,8 +6228,7 @@ func (t *Terminal) Loop() error {
 			case actFrecencyEntryNerf:
 				if t.frecencyDB != nil {
 					if item := t.currentItem(); item != nil {
-						itemStr := item.AsString(t.ansi)
-						t.frecencyDB.Nerf(itemStr)
+						t.frecencyDB.NerfItem(item)
 						t.frecencyDB.Save()
 						changed = true
 					}
@@ -6240,8 +6236,7 @@ func (t *Terminal) Loop() error {
 			case actFrecencyEntryRemove:
 				if t.frecencyDB != nil {
 					if item := t.currentItem(); item != nil {
-						itemStr := item.AsString(t.ansi)
-						t.frecencyDB.Remove(itemStr)
+						t.frecencyDB.RemoveItem(item)
 						t.frecencyDB.Save()
 						changed = true
 					}
