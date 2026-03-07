@@ -61,7 +61,7 @@ type Pattern struct {
 	delimiter     Delimiter
 	nth           []Range
 	revision      revision
-	procFun       map[termType]algo.Algo
+	procFun       [6]algo.Algo
 	cache         *ChunkCache
 	denylist      map[int32]struct{}
 	frecencyDB    *FrecencyDB
