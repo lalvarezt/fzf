@@ -151,7 +151,6 @@ func BuildPattern(cache *ChunkCache, patternCache map[string]*Pattern, fuzzy boo
 		cache:         cache,
 		denylist:      denylist,
 		startIndex:    startIndex,
-		procFun:       make(map[termType]algo.Algo),
 	}
 
 	ptr.cacheKey = ptr.buildCacheKey()
