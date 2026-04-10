@@ -83,7 +83,7 @@ Usage: fzf [options]
     --no-bold                Do not use bold text
 
   DISPLAY MODE
-    --height=[~]HEIGHT[%]    Display fzf window below the cursor with the given
+    --height=[~][-]HEIGHT[%] Display fzf window below the cursor with the given
                              height instead of using fullscreen.
                              A negative value is calculated as the terminal height
                              minus the given value.
@@ -92,9 +92,10 @@ Usage: fzf [options]
     --min-height=HEIGHT[+]   Minimum height when --height is given as a percentage.
                              Add '+' to automatically increase the value
                              according to the other layout options (default: 10+).
-    --tmux[=OPTS]            Start fzf in a tmux popup (requires tmux 3.3+)
+    --popup[=OPTS]           Start fzf in a popup window (requires tmux 3.3+ or Zellij 0.44+)
                              [center|top|bottom|left|right][,SIZE[%]][,SIZE[%]]
                              [,border-native] (default: center,50%)
+    --tmux[=OPTS]            Alias for --popup
 
   LAYOUT
     --layout=LAYOUT          Choose layout: [default|reverse|reverse-list]
@@ -435,7 +436,7 @@ func parseTmuxOptions(arg string, index int) (*tmuxOptions, error) {
 	var err error
 	opts := defaultTmuxOptions(index)
 	tokens := splitRegexp.Split(arg, -1)
-	errorToReturn := errors.New("invalid tmux option: " + arg + " (expected: [center|top|bottom|left|right][,SIZE[%]][,SIZE[%][,border-native]])")
+	errorToReturn := errors.New("invalid popup option: " + arg + " (expected: [center|top|bottom|left|right][,SIZE[%]][,SIZE[%][,border-native]])")
 	if len(tokens) == 0 || len(tokens) > 4 {
 		return nil, errorToReturn
 	}
@@ -926,7 +927,7 @@ func nthTransformer(str string) (func(Delimiter) func([]Token, int32) string, er
 		nth   []Range
 	}
 
-	parts := make([]NthParts, len(indexes))
+	parts := make([]NthParts, 0, len(indexes))
 	idx := 0
 	for _, index := range indexes {
 		if idx < index[0] {
@@ -2305,9 +2306,6 @@ func parseHeight(str string, index int) (heightSpec, error) {
 		str = str[1:]
 	}
 	if strings.HasPrefix(str, "-") {
-		if heightSpec.auto {
-			return heightSpec, errors.New("negative(-) height is not compatible with adaptive(~) height")
-		}
 		heightSpec.inverse = true
 		str = str[1:]
 	}
@@ -2720,7 +2718,7 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			opts.Version = true
 		case "--no-winpty":
 			opts.NoWinpty = true
-		case "--tmux":
+		case "--tmux", "--popup":
 			given, str := optionalNextString()
 			if given {
 				if opts.Tmux, err = parseTmuxOptions(str, index); err != nil {
@@ -2729,7 +2727,7 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			} else {
 				opts.Tmux = defaultTmuxOptions(index)
 			}
-		case "--no-tmux":
+		case "--no-tmux", "--no-popup":
 			opts.Tmux = nil
 		case "--tty-default":
 			if opts.TtyDefault, err = nextString("tty device name required"); err != nil {
@@ -3288,7 +3286,7 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			}
 			opts.PreviewWrapSign = &str
 		case "--height":
-			str, err := nextString("height required: [~]HEIGHT[%]")
+			str, err := nextString("height required: [~][-]HEIGHT[%]")
 			if err != nil {
 				return err
 			}
@@ -3655,7 +3653,9 @@ func applyPreset(opts *Options, preset string) error {
 		opts.Preview.border = tui.BorderLine
 		opts.Preview.info = false
 		opts.InfoStyle = infoDefault
-		opts.Theme.Gutter = tui.ColorAttr{Color: -1, Attr: 0}
+		opts.Theme.Gutter = tui.NewColorAttr()
+		space := " "
+		opts.Gutter = &space
 		empty := ""
 		opts.Separator = &empty
 		opts.Scrollbar = &empty
@@ -3730,7 +3730,7 @@ func validateOptions(opts *Options) error {
 		}
 	}
 
-	if opts.Height.auto {
+	if opts.Height.auto && (opts.Tmux == nil || opts.Tmux.index < opts.Height.index) {
 		for _, s := range []sizeSpec{opts.Margin[0], opts.Margin[2]} {
 			if s.percent {
 				return errors.New("adaptive height is not compatible with top/bottom percent margin")
@@ -3762,6 +3762,10 @@ func noSeparatorLine(style infoStyle, separator bool) bool {
 
 func (opts *Options) useTmux() bool {
 	return opts.Tmux != nil && len(os.Getenv("TMUX")) > 0 && opts.Tmux.index >= opts.Height.index
+}
+
+func (opts *Options) useZellij() bool {
+	return opts.Tmux != nil && len(os.Getenv("ZELLIJ")) > 0 && opts.Tmux.index >= opts.Height.index
 }
 
 func (opts *Options) noSeparatorLine() bool {
