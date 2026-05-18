@@ -1,6 +1,50 @@
 CHANGELOG
 =========
 
+0.73.0
+------
+- Timer-driven `every(N)` event for `--bind`, where `N` is seconds (fractional, floored to `0.01`). Ticks that overlap an in-flight action are coalesced, so a slow `reload` cannot accumulate a backlog.
+- New `FZF_IDLE_TIME` (whole seconds) and `FZF_IDLE_TIME_MS` (milliseconds) environment variables exported to child processes, holding the elapsed time since the last user activity. Pair with `every(N)` to build idle-based behavior such as auto-accept or auto-quit (#1211).
+      ```sh
+      # Live process list; --track --id-nth 2 keeps the cursor on the same PID across reloads
+      fzf --header-lines 1 --track --id-nth 2 --bind 'start,every(2):reload-sync:ps -ef'
+
+      # Auto-accept after 10 seconds of inactivity, with a countdown in the footer after 5s
+      fzf --bind 'every(1):bg-transform:
+        if   [[ $FZF_IDLE_TIME -lt 5  ]]; then echo change-footer:
+        elif [[ $FZF_IDLE_TIME -lt 10 ]]; then echo "change-footer:auto-accept in $((10 - FZF_IDLE_TIME))s"
+        else echo accept
+        fi'
+      ```
+- Bug fixes
+    - `change-preview-window` no longer resets `wrap` / `wrap-word` state set via `toggle-preview-wrap` / `toggle-preview-wrap-word`. Layout fields still snap to the preset, so cycling and the empty-token reset behave as before. The new spec can still override by including `wrap` or `nowrap` explicitly. (#4791)
+
+0.72.0
+------
+_Release highlights: https://junegunn.github.io/fzf/releases/0.72.0/_
+
+- `--header-border`, `--header-lines-border`, and `--footer-border` now accept a new `inline` style that embeds the section inside the list frame, separated from the list content by a horizontal line. When the list border has side segments, the separator joins them as T-junctions.
+    - Requires a `--list-border` shape that has both top and bottom segments (`rounded`, `sharp`, `bold`, `double`, `block`, `thinblock`, or `horizontal`); falls back to `line` otherwise. `horizontal` has no side borders, so the separator is drawn without T-junction endpoints.
+    - Sections stack. Example combining all three:
+      ```sh
+      ps -ef | fzf --reverse --style full \
+          --header 'Select a process' --header-lines 1 \
+          --bind 'load:transform-footer:echo $FZF_TOTAL_COUNT processes' \
+          --header-border dashed --header-first \
+          --header-lines-border inline --footer-border inline
+      ```
+    - `--header-label` and `--footer-label` render on their respective separator row.
+    - The separator inherits `--color list-border` when the section's own border color is not explicitly set.
+    - `inline` takes precedence over `--header-first`: the inline section stays inside the list frame. `--header-border=inline` requires `--header-lines-border` to be `inline` or unset.
+- New `dashed` border style with dashed edges (`╶` / `┆`) and rounded corners.
+    - `--border=dashed`, `--list-border=dashed`, etc.
+    - Works with inline sections (T-junctions render correctly).
+- [vim] Move and resize popup window when detecting `VimResized` event (#4778) (@Vulcalien)
+- Bug fixes
+    - Fixed gutter display in `--style=minimal`
+    - Fixed arrow keys / Home / End without modifiers being ignored under the kitty keyboard protocol (#4776) (@TymekDev)
+    - bash: Persist history deletion when `histappend` is on (#4764)
+
 0.71.0
 ------
 _Release highlights: https://junegunn.github.io/fzf/releases/0.71.0/_

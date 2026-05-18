@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -436,6 +437,7 @@ type Terminal struct {
 	bgSemaphores         map[action]chan struct{}
 	keyChan              chan tui.Event
 	eventChan            chan tui.Event
+	timerChan            chan tui.Event
 	slab                 *util.Slab
 	theme                *tui.ColorTheme
 	tui                  tui.Renderer
@@ -456,6 +458,7 @@ type Terminal struct {
 	proxyScript          string
 	numLinesCache        map[int32]numLinesCacheValue
 	raw                  bool
+	lastActivity         time.Time
 }
 
 type numLinesCacheValue struct {
@@ -1154,6 +1157,7 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 		bgSemaphores:       make(map[action]chan struct{}),
 		keyChan:            make(chan tui.Event),
 		eventChan:          make(chan tui.Event, 6), // start | (load + result + zero|one) | (focus) | (resize)
+		timerChan:          make(chan tui.Event),    // unbuffered: every() ticks coalesce when main loop is busy
 		tui:                renderer,
 		ttyDefault:         opts.TtyDefault,
 		ttyin:              ttyin,
@@ -1161,6 +1165,7 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 		executing:          util.NewAtomicBool(false),
 		lastAction:         actStart,
 		lastFocus:          minItem.Index(),
+		lastActivity:       time.Now(),
 		numLinesCache:      make(map[int32]numLinesCacheValue)}
 	if opts.AcceptNth != nil {
 		t.acceptNth = opts.AcceptNth(t.delimiter)
@@ -1170,8 +1175,15 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 	if baseTheme == nil {
 		baseTheme = renderer.DefaultTheme()
 	}
+	// If the list border can't host an inline separator, the runtime later coerces
+	// BorderInline to BorderLine. Mirror that here so theme color inheritance matches
+	// the final rendering rather than the user's requested shape.
+	inlineListSupported := opts.ListBorderShape.HasTop() && opts.ListBorderShape.HasBottom()
+	headerInline := inlineListSupported && (opts.HeaderBorderShape == tui.BorderInline || opts.HeaderLinesShape == tui.BorderInline)
+	footerInline := inlineListSupported && opts.FooterBorderShape == tui.BorderInline
+	hasHeader := opts.HeaderBorderShape.Visible() || opts.HeaderLinesShape.Visible()
 	// This should be called before accessing tui.Color*
-	tui.InitTheme(opts.Theme, baseTheme, opts.Bold, opts.Black, opts.InputBorderShape.Visible(), opts.HeaderBorderShape.Visible())
+	tui.InitTheme(opts.Theme, baseTheme, opts.Bold, opts.Black, opts.InputBorderShape.Visible(), hasHeader, headerInline, footerInline)
 
 	// Gutter character
 	var gutterChar, gutterRawChar string
@@ -1227,6 +1239,22 @@ func NewTerminal(opts *Options, eventBox *util.EventBox, executor *util.Executor
 			t.inputBorderShape = tui.BorderBottom
 		} else {
 			t.inputBorderShape = tui.BorderTop
+		}
+	}
+
+	// Inline borders are embedded between the list's top and bottom horizontals.
+	// Shapes missing either one (none/phantom/line/single-sided) fall back to a plain
+	// horizontal separator (same as BorderLine).
+	inlineSupported := t.listBorderShape.HasTop() && t.listBorderShape.HasBottom()
+	if !inlineSupported {
+		if t.headerBorderShape == tui.BorderInline {
+			t.headerBorderShape = tui.BorderLine
+		}
+		if t.headerLinesShape == tui.BorderInline {
+			t.headerLinesShape = tui.BorderLine
+		}
+		if t.footerBorderShape == tui.BorderInline {
+			t.footerBorderShape = tui.BorderLine
 		}
 	}
 
@@ -1365,6 +1393,9 @@ func (t *Terminal) environImpl(forPreview bool) []string {
 	env = append(env, "FZF_QUERY="+string(t.input))
 	env = append(env, "FZF_ACTION="+t.lastAction.Name())
 	env = append(env, "FZF_KEY="+t.lastKey)
+	idleMs := time.Since(t.lastActivity).Milliseconds()
+	env = append(env, fmt.Sprintf("FZF_IDLE_TIME=%d", idleMs/1000))
+	env = append(env, fmt.Sprintf("FZF_IDLE_TIME_MS=%d", idleMs))
 	env = append(env, "FZF_PROMPT="+string(t.promptString))
 	env = append(env, "FZF_GHOST="+string(t.ghost))
 	env = append(env, "FZF_POINTER="+string(t.pointer))
@@ -1796,14 +1827,16 @@ func (t *Terminal) changeHeader(header string) bool {
 	return needFullRedraw
 }
 
-func (t *Terminal) changeFooter(footer string) {
+func (t *Terminal) changeFooter(footer string) bool {
 	var lines []string
 	if len(footer) > 0 {
 		lines = strings.Split(strings.TrimSuffix(footer, "\n"), "\n")
 	}
+	needFullRedraw := len(t.footer) != len(lines)
 	t.footer = lines
 	t.clickFooterLine = 0
 	t.clickFooterColumn = 0
+	return needFullRedraw
 }
 
 // UpdateHeader updates the header
@@ -2143,7 +2176,7 @@ func (t *Terminal) adjustMarginAndPadding() (int, int, [4]int, [4]int) {
 			if idx == 3 {
 				extraMargin[idx] += 1 + bw
 			}
-		case tui.BorderRounded, tui.BorderSharp, tui.BorderBold, tui.BorderBlock, tui.BorderThinBlock, tui.BorderDouble:
+		case tui.BorderRounded, tui.BorderSharp, tui.BorderBold, tui.BorderBlock, tui.BorderThinBlock, tui.BorderDouble, tui.BorderDashed:
 			extraMargin[idx] += 1 + bw*(idx%2)
 		}
 		marginInt[idx] = sizeSpecToInt(idx, sizeSpec) + extraMargin[idx]
@@ -2246,6 +2279,98 @@ func (t *Terminal) determineHeaderLinesShape() (bool, tui.BorderShape) {
 	}
 
 	return false, tui.BorderNone
+}
+
+// Inline sections live inside wborder rather than consuming shift/shrink/availableLines.
+type inlineRole int
+
+const (
+	inlineRoleHeader inlineRole = iota
+	inlineRoleHeaderLines
+	inlineRoleFooter
+)
+
+type inlineSlot struct {
+	role         inlineRole
+	windowType   tui.WindowType
+	contentLines int // 0 when out of budget: a ghost placeholder is created so
+	// t.headerWindow / t.footerWindow stay non-nil but no frame is painted.
+	label     labelPrinter
+	labelOpts labelOpts
+	labelLen  int
+}
+
+// inlineMetaFor returns (onTop: top stack vs bottom; windowType; isInner:
+// adjacent to list content) for the given inline role, derived from the layout.
+// Header is outer when paired with header-lines; header-lines is always inner;
+// footer is inner except in reverseList where it sits outside header-lines.
+func (t *Terminal) inlineMetaFor(role inlineRole) (onTop bool, windowType tui.WindowType, isInner bool) {
+	switch role {
+	case inlineRoleHeader:
+		return t.layout == layoutReverse, tui.WindowHeader, false
+	case inlineRoleHeaderLines:
+		return t.layout != layoutDefault, tui.WindowHeader, true
+	case inlineRoleFooter:
+		return t.layout != layoutReverse, tui.WindowFooter, t.layout != layoutReverseList
+	}
+	return false, tui.WindowBase, false
+}
+
+func (t *Terminal) placeInlineSection(win tui.Window, role inlineRole) {
+	switch role {
+	case inlineRoleHeader:
+		t.headerWindow = win
+	case inlineRoleHeaderLines:
+		t.headerLinesWindow = win
+	case inlineRoleFooter:
+		t.footerWindow = win
+	}
+}
+
+// placeInlineStack walks `slots` in outer-to-inner order. Only the outermost
+// slot (index 0) claims the adjacent wborder edge; later slots paint side-only
+// frames so the T-junction separator lands between sections.
+func (t *Terminal) placeInlineStack(slots []inlineSlot, startRow int, onTop bool) {
+	firstEdge := tui.SectionEdgeTop
+	if !onTop {
+		firstEdge = tui.SectionEdgeBottom
+	}
+	noBorder := tui.MakeBorderStyle(tui.BorderNone, t.unicode)
+	subLeft := t.window.Left()
+	subWidth := t.window.Width()
+	cursor := startRow
+	for i, s := range slots {
+		var windowTop, sepRow int
+		if onTop {
+			windowTop = cursor
+			sepRow = cursor + s.contentLines - t.wborder.Top()
+		} else {
+			windowTop = cursor - s.contentLines + 1
+			sepRow = windowTop - 1 - t.wborder.Top()
+		}
+		// 0-height placeholder keeps t.headerWindow / t.footerWindow non-nil.
+		win := t.tui.NewWindow(windowTop, subLeft, subWidth, s.contentLines, s.windowType, noBorder, true)
+		t.placeInlineSection(win, s.role)
+		if s.contentLines == 0 {
+			continue
+		}
+		secTop := windowTop - t.wborder.Top()
+		secBottom := secTop + s.contentLines - 1
+		edge := tui.SectionEdgeNone
+		if i == 0 {
+			edge = firstEdge
+		}
+		t.wborder.PaintSectionFrame(secTop, secBottom, s.windowType, edge)
+		// useBottom=onTop so the separator always hugs the list (inner side).
+		// Matters for thinblock/block where top != bottom char.
+		t.wborder.DrawHSeparator(sepRow, s.windowType, onTop)
+		t.printLabelAt(t.wborder, s.label, s.labelOpts, s.labelLen, sepRow)
+		if onTop {
+			cursor += s.contentLines + 1
+		} else {
+			cursor -= s.contentLines + 1
+		}
+	}
 }
 
 func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
@@ -2364,6 +2489,50 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 		}
 	}
 
+	// Slices are ordered outer-to-inner: index 0 touches wborder's edge.
+	var inlineTop []inlineSlot
+	var inlineBottom []inlineSlot
+
+	// Caps contentLines against remaining wborder space. Oversized requests (e.g. a
+	// huge --header-lines) become 0-height placeholders rather than pushing the list
+	// window to negative height.
+	addInline := func(contentLines int, role inlineRole) {
+		onTop, windowType, isInner := t.inlineMetaFor(role)
+		used := 0
+		for _, s := range inlineTop {
+			if s.contentLines > 0 {
+				used += s.contentLines + 1
+			}
+		}
+		for _, s := range inlineBottom {
+			if s.contentLines > 0 {
+				used += s.contentLines + 1
+			}
+		}
+		remaining := availableLines - borderLines(t.listBorderShape) - used - 1
+		if remaining < 2 {
+			contentLines = 0
+		} else {
+			contentLines = util.Constrain(contentLines, 1, remaining-1)
+		}
+		slot := inlineSlot{role: role, windowType: windowType, contentLines: contentLines}
+		switch role {
+		case inlineRoleHeader:
+			slot.label, slot.labelOpts, slot.labelLen = t.headerLabel, t.headerLabelOpts, t.headerLabelLen
+		case inlineRoleFooter:
+			slot.label, slot.labelOpts, slot.labelLen = t.footerLabel, t.footerLabelOpts, t.footerLabelLen
+		}
+		target := &inlineTop
+		if !onTop {
+			target = &inlineBottom
+		}
+		if isInner {
+			*target = append(*target, slot)
+		} else {
+			*target = append([]inlineSlot{slot}, *target...)
+		}
+	}
+
 	// Adjust position and size of the list window if header border is set
 	headerBorderHeight := 0
 	if hasHeaderWindow {
@@ -2371,37 +2540,62 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 		if hasHeaderLinesWindow {
 			headerWindowHeight -= t.headerLines
 		}
-		headerBorderHeight = util.Constrain(borderLines(t.headerBorderShape)+headerWindowHeight, 0, availableLines)
-		if t.layout == layoutReverse {
-			shift += headerBorderHeight
-			shrink += headerBorderHeight
+		if t.headerBorderShape == tui.BorderInline {
+			addInline(headerWindowHeight, inlineRoleHeader)
 		} else {
-			shrink += headerBorderHeight
+			headerBorderHeight = util.Constrain(borderLines(t.headerBorderShape)+headerWindowHeight, 0, availableLines)
+			if t.layout == layoutReverse {
+				shift += headerBorderHeight
+				shrink += headerBorderHeight
+			} else {
+				shrink += headerBorderHeight
+			}
+			availableLines -= headerBorderHeight
 		}
-		availableLines -= headerBorderHeight
 	}
 
 	headerLinesHeight := 0
 	if hasHeaderLinesWindow {
-		headerLinesHeight = util.Constrain(borderLines(headerLinesShape)+t.headerLines, 0, availableLines)
-		if t.layout != layoutDefault {
-			shift += headerLinesHeight
-			shrink += headerLinesHeight
+		if headerLinesShape == tui.BorderInline {
+			addInline(t.headerLines, inlineRoleHeaderLines)
 		} else {
-			shrink += headerLinesHeight
+			headerLinesHeight = util.Constrain(borderLines(headerLinesShape)+t.headerLines, 0, availableLines)
+			if t.layout != layoutDefault {
+				shift += headerLinesHeight
+				shrink += headerLinesHeight
+			} else {
+				shrink += headerLinesHeight
+			}
+			availableLines -= headerLinesHeight
 		}
-		availableLines -= headerLinesHeight
 	}
 
 	footerBorderHeight := 0
 	if hasFooterWindow {
-		// Footer lines should not take all available lines
-		footerBorderHeight = util.Constrain(borderLines(t.footerBorderShape)+len(t.footer), 0, availableLines)
-		shrink += footerBorderHeight
-		if t.layout != layoutReverse {
-			shift += footerBorderHeight
+		if t.footerBorderShape == tui.BorderInline {
+			addInline(len(t.footer), inlineRoleFooter)
+		} else {
+			// Footer lines should not take all available lines
+			footerBorderHeight = util.Constrain(borderLines(t.footerBorderShape)+len(t.footer), 0, availableLines)
+			shrink += footerBorderHeight
+			if t.layout != layoutReverse {
+				shift += footerBorderHeight
+			}
+			availableLines -= footerBorderHeight
 		}
-		availableLines -= footerBorderHeight
+	}
+
+	inlineTopLines := 0
+	for _, s := range inlineTop {
+		if s.contentLines > 0 {
+			inlineTopLines += s.contentLines + 1
+		}
+	}
+	inlineBottomLines := 0
+	for _, s := range inlineBottom {
+		if s.contentLines > 0 {
+			inlineBottomLines += s.contentLines + 1
+		}
 	}
 
 	// Set up list border
@@ -2512,12 +2706,12 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 				if previewOpts.position == posUp {
 					innerBorderFn(marginInt[0]+pheight, marginInt[3], width, height-pheight)
 					t.window = t.tui.NewWindow(
-						innerMarginInt[0]+pheight+shift, innerMarginInt[3], innerWidth, innerHeight-pheight-shrink, tui.WindowList, noBorder, true)
+						innerMarginInt[0]+pheight+shift+inlineTopLines, innerMarginInt[3], innerWidth, innerHeight-pheight-shrink-inlineTopLines-inlineBottomLines, tui.WindowList, noBorder, true)
 					createPreviewWindow(marginInt[0], marginInt[3], width, pheight)
 				} else {
 					innerBorderFn(marginInt[0], marginInt[3], width, height-pheight)
 					t.window = t.tui.NewWindow(
-						innerMarginInt[0]+shift, innerMarginInt[3], innerWidth, innerHeight-pheight-shrink, tui.WindowList, noBorder, true)
+						innerMarginInt[0]+shift+inlineTopLines, innerMarginInt[3], innerWidth, innerHeight-pheight-shrink-inlineTopLines-inlineBottomLines, tui.WindowList, noBorder, true)
 					createPreviewWindow(marginInt[0]+height-pheight, marginInt[3], width, pheight)
 				}
 			case posLeft, posRight:
@@ -2556,7 +2750,7 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 						m = 1
 					}
 					t.window = t.tui.NewWindow(
-						innerMarginInt[0]+shift, innerMarginInt[3]+pwidth+m, innerWidth-pwidth-m, innerHeight-shrink, tui.WindowList, noBorder, true)
+						innerMarginInt[0]+shift+inlineTopLines, innerMarginInt[3]+pwidth+m, innerWidth-pwidth-m, innerHeight-shrink-inlineTopLines-inlineBottomLines, tui.WindowList, noBorder, true)
 
 					// Clear characters on the margin
 					// fzf --bind 'space:toggle-preview' --preview ':' --preview-window left,1
@@ -2588,7 +2782,7 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 					}
 					innerBorderFn(marginInt[0], marginInt[3], width-pwidth, height)
 					t.window = t.tui.NewWindow(
-						innerMarginInt[0]+shift, innerMarginInt[3], innerWidth-pwidth, innerHeight-shrink, tui.WindowList, noBorder, true)
+						innerMarginInt[0]+shift+inlineTopLines, innerMarginInt[3], innerWidth-pwidth, innerHeight-shrink-inlineTopLines-inlineBottomLines, tui.WindowList, noBorder, true)
 					x := marginInt[3] + width - pwidth
 					createPreviewWindow(marginInt[0], x, pwidth, height)
 				}
@@ -2626,10 +2820,15 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 		}
 		innerBorderFn(marginInt[0], marginInt[3], width, height)
 		t.window = t.tui.NewWindow(
-			innerMarginInt[0]+shift,
+			innerMarginInt[0]+shift+inlineTopLines,
 			innerMarginInt[3],
 			innerWidth,
-			innerHeight-shrink, tui.WindowList, noBorder, true)
+			innerHeight-shrink-inlineTopLines-inlineBottomLines, tui.WindowList, noBorder, true)
+	}
+
+	if len(inlineTop)+len(inlineBottom) > 0 && t.wborder != nil {
+		t.placeInlineStack(inlineTop, t.window.Top()-inlineTopLines, true)
+		t.placeInlineStack(inlineBottom, t.window.Top()+t.window.Height()+inlineBottomLines-1, false)
 	}
 
 	if len(t.scrollbar) == 0 {
@@ -2666,7 +2865,11 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 
 	if hasInputWindow {
 		var btop int
-		if (hasHeaderWindow || hasHeaderLinesWindow) && t.headerFirst {
+		// Inline sections live inside the list frame, so they don't participate
+		// in --header-first repositioning; only non-inline sections do.
+		hasNonInlineHeader := hasHeaderWindow && t.headerBorderShape != tui.BorderInline
+		hasNonInlineHeaderLines := hasHeaderLinesWindow && headerLinesShape != tui.BorderInline
+		if (hasNonInlineHeader || hasNonInlineHeaderLines) && t.headerFirst {
 			switch t.layout {
 			case layoutDefault:
 				btop = w.Top() + w.Height()
@@ -2711,7 +2914,7 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 	}
 
 	// Set up header border
-	if hasHeaderWindow {
+	if hasHeaderWindow && t.headerBorderShape != tui.BorderInline {
 		var btop int
 		if hasInputWindow && t.headerFirst {
 			if t.layout == layoutReverse {
@@ -2739,7 +2942,7 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 	}
 
 	// Set up header lines border
-	if hasHeaderLinesWindow {
+	if hasHeaderLinesWindow && headerLinesShape != tui.BorderInline {
 		var btop int
 		// NOTE: We still have to handle --header-first here in case
 		// --header-lines-border is set. Can't we just use header window instead
@@ -2772,7 +2975,7 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 	}
 
 	// Set up footer
-	if hasFooterWindow {
+	if hasFooterWindow && t.footerBorderShape != tui.BorderInline {
 		var btop int
 		if t.layout == layoutReverse {
 			btop = w.Top() + w.Height()
@@ -2789,8 +2992,21 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 		t.footerWindow = createInnerWindow(t.footerBorder, t.footerBorderShape, tui.WindowFooter, 0)
 	}
 
-	// Print border label
-	t.printLabel(t.wborder, t.listLabel, t.listLabelOpts, t.listLabelLen, t.listBorderShape, false)
+	// When the list label lands on an edge owned by an inline section, swap its bg
+	// so the label reads as part of that section's frame. Fg stays at list-label.
+	listLabel, listLabelLen := t.listLabel, t.listLabelLen
+	var adjacentSection *inlineSlot
+	if t.listLabelOpts.bottom && len(inlineBottom) > 0 {
+		adjacentSection = &inlineBottom[0]
+	} else if !t.listLabelOpts.bottom && len(inlineTop) > 0 {
+		adjacentSection = &inlineTop[0]
+	}
+	if adjacentSection != nil {
+		bg := tui.BorderColor(adjacentSection.windowType).Bg()
+		custom := tui.ColListLabel.WithBg(tui.ColorAttr{Color: bg, Attr: tui.AttrUndefined})
+		listLabel, listLabelLen = t.ansiLabelPrinter(t.listLabelOpts.label, &custom, false)
+	}
+	t.printLabel(t.wborder, listLabel, t.listLabelOpts, listLabelLen, t.listBorderShape, false)
 	t.printLabel(t.border, t.borderLabel, t.borderLabelOpts, t.borderLabelLen, t.borderShape, false)
 	t.printLabel(t.pborder, t.previewLabel, t.previewLabelOpts, t.previewLabelLen, t.activePreviewOpts.Border(), false)
 	t.printLabel(t.inputBorder, t.inputLabel, t.inputLabelOpts, t.inputLabelLen, t.inputBorderShape, false)
@@ -2798,37 +3014,39 @@ func (t *Terminal) resizeWindows(forcePreview bool, redrawBorder bool) {
 	t.printLabel(t.footerBorder, t.footerLabel, t.footerLabelOpts, t.footerLabelLen, t.footerBorderShape, false)
 }
 
+// printLabelAt positions and renders a label at the given row of `window`. Shared by
+// printLabel (which computes row from the border shape) and the inline-section label
+// code (which uses an explicit separator row).
+func (t *Terminal) printLabelAt(window tui.Window, render labelPrinter, opts labelOpts, length int, row int) {
+	if window == nil || render == nil || window.Height() == 0 {
+		return
+	}
+	var col int
+	if opts.column == 0 {
+		col = max(0, (window.Width()-length)/2)
+	} else if opts.column < 0 {
+		col = max(0, window.Width()+opts.column+1-length)
+	} else {
+		col = min(opts.column-1, window.Width()-length)
+	}
+	window.Move(row, col)
+	render(window, window.Width())
+}
+
 func (t *Terminal) printLabel(window tui.Window, render labelPrinter, opts labelOpts, length int, borderShape tui.BorderShape, redrawBorder bool) {
-	if window == nil {
+	if window == nil || window.Height() == 0 {
 		return
 	}
-
-	if window.Height() == 0 {
-		return
-	}
-
 	switch borderShape {
-	case tui.BorderHorizontal, tui.BorderTop, tui.BorderBottom, tui.BorderRounded, tui.BorderSharp, tui.BorderBold, tui.BorderBlock, tui.BorderThinBlock, tui.BorderDouble:
+	case tui.BorderHorizontal, tui.BorderTop, tui.BorderBottom, tui.BorderRounded, tui.BorderSharp, tui.BorderBold, tui.BorderBlock, tui.BorderThinBlock, tui.BorderDouble, tui.BorderDashed:
 		if redrawBorder {
 			window.DrawHBorder()
-		}
-		if render == nil {
-			return
-		}
-		var col int
-		if opts.column == 0 {
-			col = max(0, (window.Width()-length)/2)
-		} else if opts.column < 0 {
-			col = max(0, window.Width()+opts.column+1-length)
-		} else {
-			col = min(opts.column-1, window.Width()-length)
 		}
 		row := 0
 		if borderShape == tui.BorderBottom || opts.bottom {
 			row = window.Height() - 1
 		}
-		window.Move(row, col)
-		render(window, window.Width())
+		t.printLabelAt(window, render, opts, length, row)
 	}
 }
 
@@ -3196,8 +3414,19 @@ func (t *Terminal) resizeIfNeeded() bool {
 		return true
 	}
 
+	// Inline sections are budget-capped inside wborder, so window.Height() may be
+	// smaller than the requested content length. Treat "capped" (height < want) as
+	// a no-op to avoid triggering a full redraw on every info/header/footer event
+	// when the user has requested more content than fits.
+	mismatch := func(shape tui.BorderShape, height, want int) bool {
+		if shape == tui.BorderInline && height < want {
+			return false
+		}
+		return height != want
+	}
+
 	// Check footer window
-	if len(t.footer) > 0 && (t.footerWindow == nil || t.footerWindow.Height() != len(t.footer)) ||
+	if len(t.footer) > 0 && (t.footerWindow == nil || mismatch(t.footerBorderShape, t.footerWindow.Height(), len(t.footer))) ||
 		len(t.footer) == 0 && t.footerWindow != nil {
 		t.printAll()
 		return true
@@ -3211,14 +3440,12 @@ func (t *Terminal) resizeIfNeeded() bool {
 	if needHeaderLinesWindow {
 		primaryHeaderLines -= t.headerLines
 	}
-	// FIXME: Full redraw is triggered if there are too many lines in the header
-	// so that the header window cannot display all of them.
 	if (needHeaderWindow && t.headerWindow == nil) ||
 		(!needHeaderWindow && t.headerWindow != nil) ||
-		(needHeaderWindow && t.headerWindow != nil && primaryHeaderLines != t.headerWindow.Height()) ||
+		(needHeaderWindow && t.headerWindow != nil && mismatch(t.headerBorderShape, t.headerWindow.Height(), primaryHeaderLines)) ||
 		(needHeaderLinesWindow && t.headerLinesWindow == nil) ||
 		(!needHeaderLinesWindow && t.headerLinesWindow != nil) ||
-		(needHeaderLinesWindow && t.headerLinesWindow != nil && t.headerLines != t.headerLinesWindow.Height()) {
+		(needHeaderLinesWindow && t.headerLinesWindow != nil && mismatch(t.headerLinesShape, t.headerLinesWindow.Height(), t.headerLines)) {
 		t.printAll()
 		return true
 	}
@@ -3230,14 +3457,23 @@ func (t *Terminal) printHeader() {
 		return
 	}
 
-	t.withWindow(t.headerWindow, func() {
-		var headerItems []Item
-		if !t.hasHeaderLinesWindow() {
-			headerItems = t.header
-		}
-		t.printHeaderImpl(t.headerWindow, t.headerBorderShape, t.header0, headerItems)
-	})
-	if w, shape := t.determineHeaderLinesShape(); w {
+	// headerWindow is nil when hasHeaderWindow() returned false at resize time,
+	// e.g. --header-border=inline combined with empty header content. Don't
+	// delegate to printHeaderImpl because its nil-window branch folds the header
+	// into the list window, which isn't valid for inline. A nil window is only
+	// legitimate when the shape is NOT inline (e.g. header combined with the
+	// list when --no-list-border is in effect).
+	if !(t.headerBorderShape == tui.BorderInline && t.headerWindow == nil) {
+		t.withWindow(t.headerWindow, func() {
+			var headerItems []Item
+			if !t.hasHeaderLinesWindow() {
+				headerItems = t.header
+			}
+			t.printHeaderImpl(t.headerWindow, t.headerBorderShape, t.header0, headerItems)
+		})
+	}
+	if w, shape := t.determineHeaderLinesShape(); w &&
+		!(shape == tui.BorderInline && t.headerLinesWindow == nil) {
 		t.withWindow(t.headerLinesWindow, func() {
 			t.printHeaderImpl(t.headerLinesWindow, shape, nil, t.header)
 		})
@@ -3288,7 +3524,10 @@ func (t *Terminal) headerIndentImpl(base int, borderShape tui.BorderShape) int {
 	if t.listBorderShape.HasLeft() {
 		indentSize += 1 + t.borderWidth
 	}
-	if borderShape.HasLeft() {
+	// Section borders with their own left side skip past the list border's left column.
+	// Inline sections also skip it, but only when the list border actually has a left,
+	// since otherwise the inline window starts flush with the list window.
+	if borderShape.HasLeft() || (borderShape == tui.BorderInline && t.listBorderShape.HasLeft()) {
 		indentSize -= 1 + t.borderWidth
 		if indentSize < 0 {
 			indentSize = 0
@@ -3384,18 +3623,18 @@ func (t *Terminal) renderEmptyLine(line int, barRange [2]int) {
 func (t *Terminal) gutter(current bool, alt bool) {
 	var color tui.ColorPair
 	if current {
-		color = tui.ColCurrentCursorEmpty
+		color = tui.ColCurrentPointerEmpty
 	} else if !t.raw && t.gutterReverse || t.raw && t.gutterRawReverse {
 		if alt {
-			color = tui.ColAltCursorEmpty
+			color = tui.ColAltPointerEmpty
 		} else {
-			color = tui.ColCursorEmpty
+			color = tui.ColPointerEmpty
 		}
 	} else {
 		if alt {
-			color = tui.ColAltCursorEmptyChar
+			color = tui.ColAltPointerEmptyChar
 		} else {
-			color = tui.ColCursorEmptyChar
+			color = tui.ColPointerEmptyChar
 		}
 	}
 	gutter := t.pointerEmpty
@@ -3583,7 +3822,7 @@ func (t *Terminal) printItem(result Result, line int, maxLine int, index int, cu
 			if len(label) == 0 {
 				t.gutter(true, false)
 			} else {
-				t.window.CPrint(tui.ColCurrentCursor, label)
+				t.window.CPrint(tui.ColCurrentPointer, label)
 			}
 			if w-t.markerLen < 0 {
 				return indentSize
@@ -3612,7 +3851,7 @@ func (t *Terminal) printItem(result Result, line int, maxLine int, index int, cu
 			if len(label) == 0 {
 				t.gutter(false, index%2 == 1)
 			} else {
-				t.window.CPrint(tui.ColCursor, label)
+				t.window.CPrint(tui.ColPointer, label)
 			}
 			if w-t.markerLen < 0 {
 				return indentSize
@@ -3763,7 +4002,7 @@ func (t *Terminal) printHighlighted(result Result, colBase tui.ColorPair, colMat
 			offset := Offset{int32(p), int32(p + w)}
 			charOffsets[idx] = offset
 		}
-		sort.Sort(ByOrder(charOffsets))
+		slices.SortFunc(charOffsets, compareOffsets)
 	}
 
 	// When postTask is nil, we're printing header lines. No need to care about nth.
@@ -3800,7 +4039,7 @@ func (t *Terminal) printHighlighted(result Result, colBase tui.ColorPair, colMat
 				end := start + int32(length)
 				nthOffsets[i] = Offset{int32(start), int32(end)}
 			}
-			sort.Sort(ByOrder(nthOffsets))
+			slices.SortFunc(nthOffsets, compareOffsets)
 		}
 	}
 	allOffsets := result.colorOffsets(charOffsets, nthOffsets, t.theme, colBase, colMatch, t.nthAttr, nthOverlay, hidden)
@@ -5587,6 +5826,35 @@ func (t *Terminal) addClickFooterWord(env []string) []string {
 	return env
 }
 
+// startTimers spawns a goroutine per every() bind event. Forwarding ticks
+// onto the unbuffered timerChan lets the ticker drop overlapping ticks
+// while the main loop is busy.
+func (t *Terminal) startTimers(ctx context.Context) {
+	for evt := range t.keymap {
+		switch evt.Type {
+		case tui.Every:
+			d := time.Duration(evt.Char) * time.Millisecond
+			evt := evt
+			go func() {
+				ticker := time.NewTicker(d)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						select {
+						case <-ctx.Done():
+							return
+						case t.timerChan <- evt:
+						}
+					}
+				}
+			}()
+		}
+	}
+}
+
 // Loop is called to start Terminal I/O
 func (t *Terminal) Loop() error {
 	// prof := profile.Start(profile.ProfilePath("/tmp/"))
@@ -5963,11 +6231,28 @@ func (t *Terminal) Loop() error {
 					case reqRedrawInputLabel:
 						t.printLabel(t.inputBorder, t.inputLabel, t.inputLabelOpts, t.inputLabelLen, t.inputBorderShape, true)
 					case reqRedrawHeaderLabel:
-						t.printLabel(t.headerBorder, t.headerLabel, t.headerLabelOpts, t.headerLabelLen, t.headerBorderShape, true)
+						if t.headerBorderShape == tui.BorderInline {
+							// Inline labels sit on the separator inside wborder; re-run the
+							// full layout to repaint the separator + label together.
+							t.printAll()
+						} else {
+							t.printLabel(t.headerBorder, t.headerLabel, t.headerLabelOpts, t.headerLabelLen, t.headerBorderShape, true)
+						}
 					case reqRedrawFooterLabel:
-						t.printLabel(t.footerBorder, t.footerLabel, t.footerLabelOpts, t.footerLabelLen, t.footerBorderShape, true)
+						if t.footerBorderShape == tui.BorderInline {
+							t.printAll()
+						} else {
+							t.printLabel(t.footerBorder, t.footerLabel, t.footerLabelOpts, t.footerLabelLen, t.footerBorderShape, true)
+						}
 					case reqRedrawListLabel:
-						t.printLabel(t.wborder, t.listLabel, t.listLabelOpts, t.listLabelLen, t.listBorderShape, true)
+						// When inline sections are active, the label's bg depends on which
+						// section owns the adjacent edge. Rerun the layout to reuse that
+						// logic rather than duplicating it here.
+						if t.headerBorderShape == tui.BorderInline || t.headerLinesShape == tui.BorderInline || t.footerBorderShape == tui.BorderInline {
+							t.printAll()
+						} else {
+							t.printLabel(t.wborder, t.listLabel, t.listLabelOpts, t.listLabelLen, t.listBorderShape, true)
+						}
 					case reqRedrawBorderLabel:
 						t.printLabel(t.border, t.borderLabel, t.borderLabelOpts, t.borderLabelLen, t.borderShape, true)
 					case reqRedrawPreviewLabel:
@@ -6077,6 +6362,7 @@ func (t *Terminal) Loop() error {
 			}
 		}
 	}()
+	t.startTimers(ctx)
 	previewDraggingPos := -1
 	barDragging := false
 	pbarDragging := false
@@ -6092,12 +6378,18 @@ func (t *Terminal) Loop() error {
 		needBarrier = false
 	}
 
-	// These variables are defined outside the loop to be accessible from closures
+	// These variables are defined outside the loop to be accessible from closures.
+	// In particular, async bg-transform callbacks run in a later iteration than
+	// the one that scheduled them, but still need to mutate state that the
+	// loop-end reload/event dispatch reads.
 	events := []util.EventType{}
 	changed := false
 	var newNth *[]Range
 	var newWithNth *withNthSpec
 	var newHeaderLines *int
+	var newCommand *commandSpec
+	var reloadSync bool
+	var denylist []int32
 	req := func(evts ...util.EventType) {
 		for _, event := range evts {
 			events = append(events, event)
@@ -6109,16 +6401,16 @@ func (t *Terminal) Loop() error {
 
 	// The main event loop
 	for loopIndex := int64(0); looping; loopIndex++ {
-		var newCommand *commandSpec
-		var reloadSync bool
 		events = []util.EventType{}
 		changed = false
 		newNth = nil
 		newWithNth = nil
 		newHeaderLines = nil
+		newCommand = nil
+		reloadSync = false
+		denylist = nil
 		beof := false
 		queryChanged := false
-		denylist := []int32{}
 
 		// Special handling of --sync. Activate the interface on the second tick.
 		if loopIndex == 1 && t.deferActivation() {
@@ -6136,6 +6428,7 @@ func (t *Terminal) Loop() error {
 		select {
 		case event = <-t.keyChan:
 			needBarrier = true
+		case event = <-t.timerChan:
 		case event = <-t.eventChan:
 			// Drain channel to process all queued events at once without rendering
 			// the intermediate states
@@ -6200,7 +6493,10 @@ func (t *Terminal) Loop() error {
 		previousInput := t.input
 		previousCx := t.cx
 		previousVersion := t.version
-		t.lastKey = event.KeyName()
+		if event.Type < tui.Invalid {
+			t.lastKey = event.KeyName()
+			t.lastActivity = time.Now()
+		}
 		updatePreviewWindow := func(forcePreview bool) {
 			t.resizeWindows(forcePreview, false)
 			req(reqPrompt, reqList, reqInfo, reqHeader, reqFooter)
@@ -6570,16 +6866,27 @@ func (t *Terminal) Loop() error {
 				t.cx = len(t.input)
 			case actChangeHeader, actTransformHeader, actBgTransformHeader:
 				capture(false, func(header string) {
-					// When a dedicated header window is not used, we may need to
-					// update other elements as well.
 					if t.changeHeader(header) {
-						req(reqList, reqPrompt, reqInfo)
+						// resizeIfNeeded() tolerates a shorter-than-wanted inline
+						// window, so a length change can leave the inline slot
+						// stale. Force a redraw to re-run the layout. Non-inline
+						// shapes are handled by resizeIfNeeded.
+						if t.headerBorderShape == tui.BorderInline {
+							req(reqRedraw)
+						} else {
+							req(reqList, reqPrompt, reqInfo)
+						}
 					}
 					req(reqHeader)
 				})
 			case actChangeFooter, actTransformFooter, actBgTransformFooter:
 				capture(false, func(footer string) {
-					t.changeFooter(footer)
+					if t.changeFooter(footer) && t.footerBorderShape == tui.BorderInline {
+						// resizeIfNeeded() tolerates a shorter-than-wanted inline
+						// window, so a length change can leave the inline slot
+						// stale. Force a redraw to re-run the layout.
+						req(reqRedraw)
+					}
 					req(reqFooter)
 				})
 			case actChangeHeaderLabel, actTransformHeaderLabel, actBgTransformHeaderLabel:
@@ -7594,6 +7901,11 @@ func (t *Terminal) Loop() error {
 				// Reset preview options and apply the additional options
 				t.previewOpts = t.initialPreviewOpts
 				t.previewOpts.command = currentPreviewOpts.command
+
+				// Carry over toggle-driven state so toggle-preview-wrap survives
+				// a change-preview-window. Tokens below can still override.
+				t.previewOpts.wrap = currentPreviewOpts.wrap
+				t.previewOpts.wrapWord = currentPreviewOpts.wrapWord
 
 				// Split window options
 				tokens := strings.Split(a.a, "|")
