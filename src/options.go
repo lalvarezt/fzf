@@ -177,7 +177,7 @@ Usage: fzf [options]
   PREVIEW WINDOW
     --preview=COMMAND        Command to preview highlighted line ({})
     --preview-window=OPT     Preview window layout (default: right:50%)
-                             [up|down|left|right][,SIZE[%]]
+                             [up|down|left|right|next][,SIZE[%]]
                              [,[no]wrap[-word]][,[no]cycle][,[no]follow][,[no]info]
                              [,[no]hidden][,border-STYLE]
                              [,+SCROLL[OFFSETS][/DENOM]][,~HEADER_LINES]
@@ -250,6 +250,7 @@ Usage: fzf [options]
     --bash                   Print script to set up Bash shell integration
     --zsh                    Print script to set up Zsh shell integration
     --fish                   Print script to set up Fish shell integration
+    --nushell                Print script to set up Nushell integration
 
   HELP
     --version                Display version information and exit
@@ -350,6 +351,7 @@ const (
 	posLeft
 	posRight
 	posCenter
+	posNext // adjacent to the input section, on the list side
 )
 
 type tmuxOptions struct {
@@ -409,7 +411,7 @@ func (o *previewOpts) Toggle() {
 	o.hidden = !o.hidden
 }
 
-func (o *previewOpts) Border() tui.BorderShape {
+func (o *previewOpts) Border(layout layoutType) tui.BorderShape {
 	shape := o.border
 	if shape == tui.BorderLine {
 		switch o.position {
@@ -421,6 +423,12 @@ func (o *previewOpts) Border() tui.BorderShape {
 			shape = tui.BorderRight
 		case posRight:
 			shape = tui.BorderLeft
+		case posNext:
+			if layout == layoutReverse {
+				shape = tui.BorderBottom
+			} else {
+				shape = tui.BorderTop
+			}
 		}
 	}
 	return shape
@@ -530,7 +538,7 @@ func parseLabelPosition(opts *labelOpts, arg string) error {
 }
 
 func (a previewOpts) aboveOrBelow() bool {
-	return a.size.size > 0 && (a.position == posUp || a.position == posDown)
+	return a.size.size > 0 && (a.position == posUp || a.position == posDown || a.position == posNext)
 }
 
 type previewOptsCompare int
@@ -597,6 +605,7 @@ type Options struct {
 	Bash              bool
 	Zsh               bool
 	Fish              bool
+	Nushell           bool
 	Man               bool
 	Fuzzy             bool
 	FuzzyAlgo         algo.Algo
@@ -751,6 +760,7 @@ func defaultOptions() *Options {
 		Bash:         false,
 		Zsh:          false,
 		Fish:         false,
+		Nushell:      false,
 		Man:          false,
 		Fuzzy:        true,
 		FuzzyAlgo:    algo.FuzzyMatchV2,
@@ -2436,6 +2446,8 @@ func parsePreviewWindowImpl(opts *previewOpts, input string) error {
 			opts.position = posLeft
 		case "right":
 			opts.position = posRight
+		case "next":
+			opts.position = posNext
 		case "rounded", "border", "border-rounded":
 			opts.border = tui.BorderRounded
 		case "border-line":
@@ -2628,6 +2640,7 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 		opts.Bash = false
 		opts.Zsh = false
 		opts.Fish = false
+		opts.Nushell = false
 		opts.Help = false
 		opts.Version = false
 		opts.Man = false
@@ -2740,6 +2753,9 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 		case "--fish":
 			clearExitingOpts()
 			opts.Fish = true
+		case "--nushell":
+			clearExitingOpts()
+			opts.Nushell = true
 		case "-h", "--help":
 			clearExitingOpts()
 			opts.Help = true
@@ -3295,7 +3311,7 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 		case "--no-preview":
 			opts.Preview.command = ""
 		case "--preview-window":
-			str, err := nextString("preview window layout required: [up|down|left|right][,SIZE[%]][,border-STYLE][,wrap][,cycle][,hidden][,+SCROLL[OFFSETS][/DENOM]][,~HEADER_LINES][,default]")
+			str, err := nextString("preview window layout required: [up|down|left|right|next][,SIZE[%]][,border-STYLE][,wrap][,cycle][,hidden][,+SCROLL[OFFSETS][/DENOM]][,~HEADER_LINES][,default]")
 			if err != nil {
 				return err
 			}
