@@ -1443,7 +1443,10 @@ func (t *Terminal) environImpl(forPreview bool) []string {
 	env = append(env, fmt.Sprintf("FZF_COLUMNS=%d", t.areaColumns))
 	env = append(env, fmt.Sprintf("FZF_POS=%d", min(t.merger.Length(), t.cy+1)))
 	if item := t.currentItem(); item != nil {
-		env = append(env, "FZF_CURRENT_ITEM="+item.AsString(t.ansi))
+		// Skip if the value contains a NUL byte; exec(2) would reject the env.
+		if s := item.AsString(t.ansi); !strings.ContainsRune(s, 0) {
+			env = append(env, "FZF_CURRENT_ITEM="+s)
+		}
 	}
 	env = append(env, fmt.Sprintf("FZF_CLICK_HEADER_LINE=%d", t.clickHeaderLine))
 	env = append(env, fmt.Sprintf("FZF_CLICK_HEADER_COLUMN=%d", t.clickHeaderColumn))
@@ -6862,7 +6865,7 @@ func (t *Terminal) Loop() error {
 						changed = true
 						// Deselect items that are now part of the header
 						for idx := range t.selected {
-							if idx < int32(n) {
+							if int(idx) < n {
 								delete(t.selected, idx)
 							}
 						}
@@ -7006,7 +7009,8 @@ func (t *Terminal) Loop() error {
 				})
 			case actTransform, actBgTransform:
 				capture(false, func(body string) {
-					if actions, err := parseSingleActionList(strings.Trim(body, "\r\n")); err == nil {
+					// Allow 'put' if the triggering key is a printable character
+					if actions, err := parseSingleActionList(strings.Trim(body, "\r\n"), event.Printable()); err == nil {
 						// NOTE: We're not properly passing the return value here
 						doActions(actions)
 					}
