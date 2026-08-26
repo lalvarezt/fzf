@@ -24,14 +24,44 @@ const (
 	defaultEscDelay = 100
 	escPollInterval = 5
 	offsetPollTries = 10
+	queryTimeout    = 500 * time.Millisecond
 	maxInputBuffer  = 1024 * 1024
+	escapeLookback  = 256
 	maxSelectTries  = 100
 )
 
 const DefaultTtyDevice string = "/dev/tty"
 
-var offsetRegexp = regexp.MustCompile("(.*?)\x00?\x1b\\[([0-9]+);([0-9]+)R")
+var offsetRegexp = regexp.MustCompile("\x00?\x1b\\[([0-9]+);([0-9]+)R")
 var offsetRegexpBegin = regexp.MustCompile("^\x1b\\[[0-9]+;[0-9]+R")
+
+// DECRPM reply to the DECRQM query for bracketed paste mode. Ps is 1 or 3 when
+// the mode was already set, 2 or 4 when reset, 0 when the terminal does not
+// recognize the mode.
+var pasteModeRegexp = regexp.MustCompile("\x00?\x1b\\[\\?2004;([0-4])\\$y")
+var pasteModeRegexpBegin = regexp.MustCompile("^\x1b\\[\\?2004;[0-4]\\$y")
+
+// A report to ask the terminal for, and the reply to recognize it by.
+type termQuery struct {
+	seq   string
+	reply *regexp.Regexp
+}
+
+var offsetQuery = termQuery{"6n", offsetRegexp}
+var pasteModeQuery = termQuery{"?2004$p", pasteModeRegexp}
+
+// What we ask the terminal at startup, in the order the queries go out.
+// A terminal answers them in that order, so the cursor position query is last
+// and also ends the wait: every terminal fzf supports answers it, so once its
+// reply arrives, a query still unanswered is one the terminal does not know
+// rather than one we stopped waiting for too early.
+//
+// Terminals that don't support the paste mode query (DECRQM) might leave
+// 'p' on the screen. To handle such cases, we query the position before and
+// after it, compare them, and clean the artifact if they don't match.
+//
+// Reference: https://ansicode.eversources.app/en/sequence/decrqm
+var startupQueries = []termQuery{offsetQuery, pasteModeQuery, offsetQuery}
 
 func (r *LightRenderer) Bell() {
 	r.flushRaw("\a")
@@ -158,6 +188,10 @@ type LightRenderer struct {
 	showCursor    bool
 	mutex         sync.Mutex
 
+	// Whether bracketed paste was already on before we enabled it. Nil when
+	// the terminal did not answer the query.
+	pasteWasSet *bool
+
 	// Windows only
 	ttyinChannel    chan byte
 	inHandle        uintptr
@@ -230,8 +264,13 @@ func (r *LightRenderer) Init() error {
 
 	if r.fullscreen {
 		r.smcup()
-	} else {
-		y, x := r.findOffset()
+	}
+
+	// Ask everything in one round trip, before the offset is needed.
+	y, x, pasteWasSet := r.queryStartup()
+	r.pasteWasSet = pasteWasSet
+
+	if !r.fullscreen {
 		r.mouse = r.mouse && y >= 0
 		// When --no-clear is used for repetitive relaunching, there is a small
 		// time frame between fzf processes where the user keystrokes are not
@@ -300,6 +339,45 @@ func getEnv(name string, defaultValue int) int {
 	return atoi(env, defaultValue)
 }
 
+// Bytes of a CSI sequence: parameter and intermediate bytes continue it, a
+// final byte ends it. Order is not enforced. Strictness would only make fzf
+// give up on a sequence it could have framed.
+//
+// https://vt100.net/emu/dec_ansi_parser
+func csiContinues(b byte) bool { return b >= 0x20 && b <= 0x3f }
+func csiFinal(b byte) bool     { return b >= 0x40 && b <= 0x7e }
+
+// incompleteEscape reports whether the buffer ends in an escape sequence that
+// has not been terminated yet. The read loop keeps waiting in that case, so the
+// parser is never handed a fragment to guess at.
+func incompleteEscape(buffer []byte) bool {
+	// Only the tail can hold a sequence still arriving. This runs once per byte
+	// read, so scanning all of a large paste would make the read quadratic.
+	tail := buffer
+	if len(tail) > escapeLookback {
+		tail = tail[len(tail)-escapeLookback:]
+	}
+	start := bytes.LastIndexByte(tail, Esc.Byte())
+	if start < 0 || len(tail)-start < 2 {
+		return false
+	}
+	switch tail[start+1] {
+	case '[':
+		for _, b := range tail[start+2:] {
+			if csiFinal(b) {
+				return false
+			}
+			if !csiContinues(b) {
+				return false // malformed, do not wait for a terminator
+			}
+		}
+		return true
+	case 'O':
+		return len(tail)-start < 3
+	}
+	return false
+}
+
 func (r *LightRenderer) getBytes(cancellable bool) ([]byte, getCharResult, error) {
 	return r.getBytesInternal(cancellable, r.buffer, false)
 }
@@ -318,7 +396,11 @@ func (r *LightRenderer) getBytesInternal(cancellable bool, buffer []byte, nonblo
 	if c == Esc.Int() || nonblock {
 		retries = r.escDelay / escPollInterval
 	}
-	buffer = append(buffer, byte(c))
+	// A non-blocking read that found nothing has no byte to record. Recording
+	// one would put a NUL in the middle of a reply still being assembled.
+	if result.ok() {
+		buffer = append(buffer, byte(c))
+	}
 
 	pc := c
 	for {
@@ -336,6 +418,13 @@ func (r *LightRenderer) getBytesInternal(cancellable bool, buffer []byte, nonblo
 			retries = 0
 		}
 		buffer = append(buffer, byte(c))
+		// Keep waiting while a sequence is still arriving. Dropping the budget
+		// after every byte left fzf parsing whatever the read happened to end on.
+		// Past the introducer this is not the ESC key, so the wait costs no
+		// Escape latency and ESCDELAY=0 must not reduce it to nothing.
+		if retries == 0 && incompleteEscape(buffer) {
+			retries = max(r.escDelay, defaultEscDelay) / escPollInterval
+		}
 		pc = c
 
 		// This should never happen under normal conditions,
@@ -441,6 +530,12 @@ func (r *LightRenderer) escSequence(sz *int) Event {
 	}
 
 	loc := offsetRegexpBegin.FindIndex(r.buffer)
+	if loc != nil && loc[0] == 0 {
+		*sz = loc[1]
+		return Event{Invalid, 0, nil}
+	}
+
+	loc = pasteModeRegexpBegin.FindIndex(r.buffer)
 	if loc != nil && loc[0] == 0 {
 		*sz = loc[1]
 		return Event{Invalid, 0, nil}
@@ -1019,7 +1114,16 @@ func (r *LightRenderer) disableMouse() {
 
 func (r *LightRenderer) disableModes() {
 	r.disableMouse()
-	r.csi("?2004l")
+	// Put bracketed paste back the way we found it. A shell that runs fzf from
+	// a line editor widget re-enables the mode only when the editor starts, so
+	// forcing it off here would leave it off for the rest of the session.
+	// Terminals that did not answer the query fall back to disabling, which is
+	// what fzf has always done.
+	if r.pasteWasSet != nil && *r.pasteWasSet {
+		r.csi("?2004h")
+	} else {
+		r.csi("?2004l")
+	}
 }
 
 func (r *LightRenderer) Resume(clear bool, sigcont bool) {

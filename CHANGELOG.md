@@ -1,6 +1,30 @@
 CHANGELOG
 =========
 
+0.74.4
+------
+- Vim plugin
+    - fzf no longer blocks the editor, so live previews keep working while fzf is open
+        - `fzf#run` returns an empty list when it runs fzf asynchronously. Use `sink`, `sinklist`, or `exit` to get the result
+    - The popup layout now works under Zellij
+    - Added `popup` as a synonym of the `tmux` layout key
+      ```vim
+      let g:fzf_layout = { 'popup': '90%,70%' }
+      ```
+
+0.74.3
+------
+- Performance optimizations for non-ASCII input
+    - ASCII queries are up to 16x faster
+    - Non-ASCII queries are up to 12x faster
+    - Reading accented Latin input is up to 37% faster
+    - Reading CJK input reduces memory use by up to 29%
+    - ASCII input is unaffected
+- Fixed an image from a preview command being torn apart when its rows are separated by IND instead of newlines, as `chafa` does under tmux (#4885)
+- Fixed `replace-query` corrupting the item text when the query is edited afterwards
+- fzf no longer turns bracketed paste mode off on exit when the terminal already had it on, which broke pasting in shells that run fzf from a line editor widget (#4887)
+- Fixed startup blocking on terminals that never answer escape sequences, such as FreeBSD virtual terminals. fzf waited for a reply until a key was pressed, then dropped that keystroke (#2860, #976)
+
 0.74.2
 ------
 - Performance optimizations for short queries
