@@ -461,6 +461,9 @@ func Run(opts *Options) (int, error) {
 		headerUpdated = false
 		startTick = ticks
 		chunkList.Clear()
+		if frecencyDB != nil {
+			frecencyDB.InvalidateItemScoreCache()
+		}
 		itemIndex = 0
 		inputRevision.bumpMajor()
 		readyChan := make(chan bool)
@@ -587,9 +590,6 @@ func Run(opts *Options) (int, error) {
 							}, func() {
 								nthTransformer = newTransformer
 							})
-							if frecencyDB != nil {
-								frecencyDB.InvalidateItemScoreCache()
-							}
 							terminal.ResumeRendering()
 							matcher.ResumeScan()
 							withNthChanged = true

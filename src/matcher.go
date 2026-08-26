@@ -170,6 +170,9 @@ func (m *Matcher) scan(request MatchRequest) MatchResult {
 
 	minIndex := request.chunks[0].items[0].Index()
 	maxIndex := request.chunks[numChunks-1].lastIndex(minIndex)
+	if pattern.frecencyDB != nil {
+		pattern.frecencyDB.prepareItemScoreTable(minIndex, maxIndex)
+	}
 	cancelled := util.NewAtomicBool(false)
 
 	numWorkers := min(m.partitions, numChunks)

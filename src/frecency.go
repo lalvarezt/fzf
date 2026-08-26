@@ -21,27 +21,202 @@ type FrecencyEntry struct {
 	PrevAccess  int64  // Unix timestamp of previous selection
 }
 
+type scoreValue struct {
+	value atomic.Uint64
+}
+
+func (v *scoreValue) loadScore() uint16 {
+	return uint16(v.value.Load())
+}
+
+func (v *scoreValue) loadGeneration() uint32 {
+	return uint32(v.value.Load() >> 32)
+}
+
+func (v *scoreValue) store(score uint16, generation uint32) {
+	v.value.Store(uint64(generation)<<32 | uint64(score))
+}
+
+// scoreCache publishes immutable key maps so readers can use plain map lookups
+// without synchronization. Existing scores are updated in place through
+// atomics. New keys are staged in a bounded overlay and periodically folded
+// into the base map.
+type scoreCache struct {
+	values       atomic.Pointer[map[string]*scoreValue]
+	pending      sync.Map
+	pendingCount atomic.Uint32
+	mutex        sync.Mutex
+}
+
+func (c *scoreCache) Load(key string) (uint16, bool) {
+	if c.pendingCount.Load() > 0 {
+		if value, ok := c.pending.Load(key); ok {
+			return value.(*scoreValue).loadScore(), true
+		}
+	}
+	values := c.values.Load()
+	if values == nil {
+		return 0, false
+	}
+	value, ok := (*values)[key]
+	if !ok {
+		return 0, false
+	}
+	return value.loadScore(), true
+}
+
+func (c *scoreCache) Generation(key string) (uint32, bool) {
+	if c.pendingCount.Load() > 0 {
+		if value, ok := c.pending.Load(key); ok {
+			return value.(*scoreValue).loadGeneration(), true
+		}
+	}
+	values := c.values.Load()
+	if values == nil {
+		return 0, false
+	}
+	value, ok := (*values)[key]
+	if !ok {
+		return 0, false
+	}
+	return value.loadGeneration(), true
+}
+
+func (c *scoreCache) Store(key string, score uint16, generation uint32) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if values := c.values.Load(); values != nil {
+		if value, ok := (*values)[key]; ok {
+			value.store(score, generation)
+			return
+		}
+	}
+	if value, ok := c.pending.Load(key); ok {
+		cached := value.(*scoreValue)
+		cached.store(score, generation)
+		return
+	}
+
+	value := &scoreValue{}
+	value.store(score, generation)
+	c.pending.Store(key, value)
+	c.pendingCount.Add(1)
+	if c.pendingCount.Load() >= scoreCachePendingLimit {
+		c.compactLocked()
+	}
+}
+
+func (c *scoreCache) Delete(key string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if _, ok := c.pending.Load(key); ok {
+		c.pending.Delete(key)
+		c.pendingCount.Add(^uint32(0))
+		return
+	}
+	values := c.values.Load()
+	if values == nil {
+		return
+	}
+	if _, ok := (*values)[key]; !ok {
+		return
+	}
+	next := make(map[string]*scoreValue, len(*values)-1)
+	for item, value := range *values {
+		if item != key {
+			next[item] = value
+		}
+	}
+	c.values.Store(&next)
+}
+
+func (c *scoreCache) Replace(values map[string]uint16, generation uint32) {
+	c.mutex.Lock()
+	old := c.values.Load()
+	next := make(map[string]*scoreValue, len(values))
+	for key, score := range values {
+		var value *scoreValue
+		if old != nil {
+			value = (*old)[key]
+		}
+		if value == nil {
+			if pending, ok := c.pending.Load(key); ok {
+				value = pending.(*scoreValue)
+			}
+		}
+		if value == nil {
+			value = &scoreValue{}
+		}
+		value.store(score, generation)
+		next[key] = value
+	}
+	c.values.Store(&next)
+	c.pending.Clear()
+	c.pendingCount.Store(0)
+	c.mutex.Unlock()
+}
+
+func (c *scoreCache) compactLocked() {
+	values := c.values.Load()
+	pendingCount := int(c.pendingCount.Load())
+	next := make(map[string]*scoreValue, pendingCount)
+	if values != nil {
+		next = make(map[string]*scoreValue, len(*values)+pendingCount)
+		for item, value := range *values {
+			next[item] = value
+		}
+	}
+	c.pending.Range(func(item, value any) bool {
+		next[item.(string)] = value.(*scoreValue)
+		return true
+	})
+	c.values.Store(&next)
+	c.pending.Clear()
+	c.pendingCount.Store(0)
+}
+
 // FrecencyDB manages the frecency database
 type FrecencyDB struct {
-	entries        map[string]*FrecencyEntry
-	scores         sync.Map // Cached scaled scores (string -> uint16)
-	itemScores     sync.Map // Cached per-item scores (*Item -> cachedItemScore)
-	scoreGen       atomic.Uint32
-	sessionTime    time.Time // Frozen time at startup for consistent relative ordering during session
-	path           string
-	mutex          sync.RWMutex
-	dirty          bool
-	stripAnsi      bool
-	scaleFactor    float64
-	halfLife       time.Duration
-	momentumWindow time.Duration
-	momentumBoost  float64
+	entries          map[string]*FrecencyEntry
+	scores           scoreCache // Cached scaled scores (string -> uint16)
+	itemScores       sync.Map   // Cached per-item scores (*Item -> *cachedItemScore)
+	itemScoreCount   atomic.Uint32
+	itemScoreTable   atomic.Pointer[itemScoreCacheTable]
+	scoreChangeFloor atomic.Uint32
+	scoreGen         atomic.Uint32
+	keyGen           atomic.Uint32
+	scoreGenMutex    sync.Mutex
+	sessionTime      time.Time // Frozen time at startup for consistent relative ordering during session
+	path             string
+	mutex            sync.RWMutex
+	dirty            bool
+	stripAnsi        bool
+	scaleFactor      float64
+	halfLife         time.Duration
+	momentumWindow   time.Duration
+	momentumBoost    float64
 }
 
 type cachedItemScore struct {
-	generation uint32
-	score      uint16
+	item          *Item
+	keyGeneration uint32
+	generation    uint32
+	score         uint32
+	key           string
 }
+
+type itemScoreCacheTable struct {
+	base  int32
+	slots []atomic.Pointer[cachedItemScore]
+}
+
+const maxItemScoreCacheEntries = 1 << 16
+
+const maxItemScoreTableEntries = 1 << 20
+
+const scoreCachePendingLimit = 1 << 10
 
 // Frecency scoring uses frequency, recency, and momentum to rank items.
 //
@@ -101,7 +276,7 @@ func NewFrecencyDB(customPath string, scaleFactor float64, halfLife, momentumWin
 
 	db := &FrecencyDB{
 		entries:        make(map[string]*FrecencyEntry),
-		scores:         sync.Map{},
+		scores:         scoreCache{},
 		sessionTime:    time.Now(),
 		path:           path,
 		dirty:          false,
@@ -160,11 +335,8 @@ func (db *FrecencyDB) Load() error {
 	db.sessionTime = time.Now()
 	db.dirty = false
 
-	// Calculate all scores after loading entries using frozen sessionTime
-	db.scores = sync.Map{}
-	for item, entry := range db.entries {
-		db.calculateAndStoreScore(item, entry)
-	}
+	// Calculate all scores after loading entries using frozen sessionTime.
+	db.rebuildScores()
 
 	db.mutex.Unlock()
 	db.InvalidateItemScoreCache()
@@ -236,9 +408,42 @@ func (db *FrecencyDB) Save() error {
 // Uses frozen sessionTime for consistent ordering during the session.
 // Applies linear scaling: scaledScore = min(rawScore × scaleFactor, 65535)
 func (db *FrecencyDB) calculateAndStoreScore(item string, entry *FrecencyEntry) {
+	db.calculateAndStoreScoreAtGeneration(item, entry, db.scoreGen.Load())
+}
+
+func (db *FrecencyDB) calculateAndStoreScoreAtGeneration(item string, entry *FrecencyEntry, generation uint32) {
 	rawScore, _, _, _ := db.scoreComponents(entry, db.sessionTime)
 	scaledScore := uint16(math.Min(rawScore*db.scaleFactor, 65535))
-	db.scores.Store(item, scaledScore)
+	db.scores.Store(item, scaledScore, generation)
+}
+
+func (db *FrecencyDB) rebuildScores() {
+	scores := make(map[string]uint16, len(db.entries))
+	for item, entry := range db.entries {
+		rawScore, _, _, _ := db.scoreComponents(entry, db.sessionTime)
+		scores[item] = uint16(math.Min(rawScore*db.scaleFactor, 65535))
+	}
+	db.scores.Replace(scores, db.scoreGen.Load())
+}
+
+// updateScore computes the next score before publishing its generation. This
+// ordering keeps a concurrent scan from accepting an old score as current.
+func (db *FrecencyDB) updateScore(item string, entry *FrecencyEntry) {
+	db.scoreGenMutex.Lock()
+	nextGeneration := db.scoreGen.Load() + 1
+	db.calculateAndStoreScoreAtGeneration(item, entry, nextGeneration)
+	db.maybeResetItemScoreCache()
+	db.scoreGen.Store(nextGeneration)
+	db.scoreGenMutex.Unlock()
+}
+
+func (db *FrecencyDB) maybeResetItemScoreCache() {
+	if db.itemScoreCount.Load() > maxItemScoreCacheEntries {
+		db.itemScores.Clear()
+		db.itemScoreCount.Store(0)
+		db.itemScoreTable.Store(nil)
+		db.keyGen.Add(1)
+	}
 }
 
 func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw, freqComponent, decayComponent, momentumComponent float64) {
@@ -284,16 +489,38 @@ func (db *FrecencyDB) scoreComponents(entry *FrecencyEntry, now time.Time) (raw,
 // Returns 0 if the item has never been selected.
 func (db *FrecencyDB) GetScore(item string) uint16 {
 	if score, ok := db.scores.Load(item); ok {
-		return score.(uint16)
+		return score
 	}
 	return 0
 }
 
-// InvalidateItemScoreCache invalidates per-item score cache entries.
-// Call this when item.text can change (e.g. change-with-nth) or when
-// frecency scores are updated.
+// invalidateScoreGeneration advances the score generation. A keyed update
+// leaves unrelated cached scores valid; calls without a key force all cached
+// scores to refresh (used by cache stress tests).
+func (db *FrecencyDB) invalidateScoreGeneration(changedKey ...string) {
+	db.scoreGenMutex.Lock()
+	defer db.scoreGenMutex.Unlock()
+
+	nextGeneration := db.scoreGen.Load() + 1
+	if len(changedKey) == 0 {
+		db.scoreChangeFloor.Store(nextGeneration)
+	}
+	db.maybeResetItemScoreCache()
+	db.scoreGen.Store(nextGeneration)
+}
+
+// InvalidateItemScoreCache invalidates per-item score and key cache entries.
+// Call this when item identity or its original key can change.
 func (db *FrecencyDB) InvalidateItemScoreCache() {
-	db.scoreGen.Add(1)
+	db.scoreGenMutex.Lock()
+	defer db.scoreGenMutex.Unlock()
+
+	db.itemScores.Clear()
+	db.itemScoreCount.Store(0)
+	db.itemScoreTable.Store(nil)
+	db.scoreChangeFloor.Store(0)
+	db.keyGen.Add(1)
+	db.scoreGen.Store(db.scoreGen.Load() + 1)
 }
 
 func (db *FrecencyDB) keyForItem(item *Item) string {
@@ -303,18 +530,141 @@ func (db *FrecencyDB) keyForItem(item *Item) string {
 	return item.AsString(db.stripAnsi)
 }
 
+func (db *FrecencyDB) prepareItemScoreTable(minIndex, maxIndex int32) {
+	span := int64(maxIndex) - int64(minIndex)
+	if minIndex < 0 || span <= 0 || span > maxItemScoreTableEntries {
+		db.itemScoreTable.Store(nil)
+		return
+	}
+
+	needed := int(span)
+	current := db.itemScoreTable.Load()
+	if current != nil {
+		currentEnd := int64(current.base) + int64(len(current.slots))
+		if int64(minIndex) >= int64(current.base) && int64(maxIndex) <= currentEnd {
+			// Release entries for items that fell out of a tail snapshot.
+			clearRange := func(start, end int64) {
+				start = max(start, 0)
+				end = min(end, int64(len(current.slots)))
+				for idx := start; idx < end; idx++ {
+					current.slots[idx].Store(nil)
+				}
+			}
+			clearRange(0, int64(minIndex)-int64(current.base))
+			clearRange(int64(maxIndex)-int64(current.base), int64(len(current.slots)))
+			return
+		}
+	}
+
+	size := 1
+	for size < needed {
+		size *= 2
+	}
+	if size > maxItemScoreTableEntries {
+		size = maxItemScoreTableEntries
+	}
+	db.itemScoreTable.Store(&itemScoreCacheTable{base: minIndex, slots: make([]atomic.Pointer[cachedItemScore], size)})
+}
+
+func (db *FrecencyDB) getScoreForItemSlot(item *Item, slot *atomic.Pointer[cachedItemScore]) uint16 {
+	generation := db.scoreGen.Load()
+	keyGeneration := db.keyGen.Load()
+	cached := slot.Load()
+	if cached != nil && cached.item == item && cached.keyGeneration == keyGeneration {
+		if atomic.LoadUint32(&cached.generation) == generation {
+			return uint16(atomic.LoadUint32(&cached.score))
+		}
+		return db.refreshCachedItemScore(cached, generation, keyGeneration)
+	}
+
+	key := db.keyForItem(item)
+	score := db.GetScore(key)
+	candidate := &cachedItemScore{
+		item:          item,
+		keyGeneration: keyGeneration,
+		generation:    generation,
+		score:         uint32(score),
+		key:           key,
+	}
+	slot.CompareAndSwap(cached, candidate)
+	return score
+}
+
+func (db *FrecencyDB) refreshCachedItemScore(cached *cachedItemScore, generation, keyGeneration uint32) uint16 {
+	cachedGeneration := atomic.LoadUint32(&cached.generation)
+	if cachedGeneration != generation && db.scoreChangedSince(cached.key, cachedGeneration, atomic.LoadUint32(&cached.score)) {
+		score := db.GetScore(cached.key)
+		if db.scoreGen.Load() == generation && db.keyGen.Load() == keyGeneration {
+			atomic.StoreUint32(&cached.score, uint32(score))
+			atomic.StoreUint32(&cached.generation, generation)
+		}
+		return score
+	}
+	if cachedGeneration != generation && db.scoreGen.Load() == generation && db.keyGen.Load() == keyGeneration {
+		atomic.StoreUint32(&cached.generation, generation)
+	}
+	return uint16(atomic.LoadUint32(&cached.score))
+}
+
+func (db *FrecencyDB) scoreChangedSince(key string, generation, cachedScore uint32) bool {
+	if floor := db.scoreChangeFloor.Load(); floor > generation {
+		return true
+	}
+	if changed, ok := db.scores.Generation(key); ok {
+		return changed > generation
+	}
+	return cachedScore != 0
+}
+
 // GetScoreForItem returns a cached frecency score for an item.
 // It avoids repeated item.text.ToString() conversion across rescans.
 func (db *FrecencyDB) GetScoreForItem(item *Item) uint16 {
-	generation := db.scoreGen.Load()
-	if cached, ok := db.itemScores.Load(item); ok {
-		itemScore := cached.(cachedItemScore)
-		if itemScore.generation == generation {
-			return itemScore.score
+	// ASCII items without an original (with-nth) value can be converted to a
+	// string without allocating. Avoid the cache and its synchronization on
+	// this common path.
+	if item != nil && item.origText == nil && item.text.IsBytes() {
+		return db.GetScore(item.text.ToString())
+	}
+	if item != nil {
+		if table := db.itemScoreTable.Load(); table != nil {
+			index := int64(item.Index()) - int64(table.base)
+			if index >= 0 && index < int64(len(table.slots)) {
+				return db.getScoreForItemSlot(item, &table.slots[index])
+			}
 		}
 	}
-	score := db.GetScore(db.keyForItem(item))
-	db.itemScores.Store(item, cachedItemScore{generation: generation, score: score})
+
+	generation := db.scoreGen.Load()
+	keyGeneration := db.keyGen.Load()
+	if cached, ok := db.itemScores.Load(item); ok {
+		itemScore := cached.(*cachedItemScore)
+		if itemScore.keyGeneration == keyGeneration {
+			if atomic.LoadUint32(&itemScore.generation) == generation {
+				return uint16(atomic.LoadUint32(&itemScore.score))
+			}
+			return db.refreshCachedItemScore(itemScore, generation, keyGeneration)
+		}
+		key := db.keyForItem(item)
+		score := db.GetScore(key)
+		if db.scoreGen.Load() == generation && db.keyGen.Load() == keyGeneration {
+			db.itemScores.Store(item, &cachedItemScore{item: item, keyGeneration: keyGeneration, generation: generation, score: uint32(score), key: key})
+		}
+		return score
+	}
+	key := db.keyForItem(item)
+	score := db.GetScore(key)
+	candidate := &cachedItemScore{item: item, keyGeneration: keyGeneration, generation: generation, score: uint32(score), key: key}
+	actual, loaded := db.itemScores.LoadOrStore(item, candidate)
+	if !loaded {
+		db.itemScoreCount.Add(1)
+	} else if db.scoreGen.Load() == generation && db.keyGen.Load() == keyGeneration {
+		itemScore := actual.(*cachedItemScore)
+		if itemScore.keyGeneration != keyGeneration {
+			db.itemScores.Store(item, candidate)
+		} else {
+			db.refreshCachedItemScore(itemScore, generation, keyGeneration)
+		}
+	}
 	return score
 }
 
@@ -351,9 +701,8 @@ func (db *FrecencyDB) Update(item string) {
 		db.entries[item] = entry
 	}
 	// Recalculate score for this item using frozen sessionTime
-	db.calculateAndStoreScore(item, entry)
+	db.updateScore(item, entry)
 	db.dirty = true
-	db.InvalidateItemScoreCache()
 }
 
 // BuffItem increments the frequency counter for an item.
@@ -386,9 +735,8 @@ func (db *FrecencyDB) Buff(item string) {
 	}
 
 	// Recalculate score for this item using frozen sessionTime
-	db.calculateAndStoreScore(item, entry)
+	db.updateScore(item, entry)
 	db.dirty = true
-	db.InvalidateItemScoreCache()
 }
 
 // NerfItem decrements the frequency counter for an item.
@@ -419,11 +767,13 @@ func (db *FrecencyDB) Nerf(item string) {
 		db.scores.Delete(item)
 	} else {
 		// Recalculate score for this item using frozen sessionTime
-		db.calculateAndStoreScore(item, entry)
+		db.updateScore(item, entry)
 	}
 
 	db.dirty = true
-	db.InvalidateItemScoreCache()
+	if entry.Frequency == 0 {
+		db.invalidateScoreGeneration(item)
+	}
 }
 
 // RemoveItem deletes an entry for an item from the frecency database.
@@ -445,7 +795,7 @@ func (db *FrecencyDB) Remove(item string) {
 	delete(db.entries, item)
 	db.scores.Delete(item)
 	db.dirty = true
-	db.InvalidateItemScoreCache()
+	db.invalidateScoreGeneration(item)
 }
 
 // copyFile copies a file from src to dst
