@@ -194,12 +194,12 @@ func (m *Matcher) scan(request MatchRequest) MatchResult {
 				if ci >= numChunks {
 					break
 				}
-				chunkMatches := request.pattern.Match(request.chunks[ci], slab)
-				matches = append(matches, chunkMatches...)
+				start := len(matches)
+				matches = request.pattern.matchInto(request.chunks[ci], slab, matches)
 				if cancelled.Get() {
 					return
 				}
-				countChan <- len(chunkMatches)
+				countChan <- len(matches) - start
 			}
 			if m.sort && request.pattern.sortable {
 				m.sortBuf[idx] = radixSortResults(matches, m.tac, m.sortBuf[idx])

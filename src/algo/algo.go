@@ -849,11 +849,19 @@ func FuzzyMatchV2(caseSensitive bool, normalize bool, forward bool, input *util.
 	// Unlike the original algorithm, we do not allow omission.
 	f0 := int(F[0])
 	width := lastIdx - f0 + 1
-	offset16, H := alloc16(offset16, slab, width*M)
+	rows := M
+	rowMask := -1
+	if !withPos && !DEBUG {
+		// Scoring only needs the current and previous rows. Backtracking needs
+		// the complete matrices.
+		rows = 2
+		rowMask = 1
+	}
+	offset16, H := alloc16(offset16, slab, width*rows)
 	copy(H, H0[f0:lastIdx+1])
 
 	// Possible length of consecutive chunk at each position.
-	_, C := alloc16(offset16, slab, width*M)
+	_, C := alloc16(offset16, slab, width*rows)
 	copy(C, C0[f0:lastIdx+1])
 
 	Fsub := F[1:]
@@ -862,14 +870,15 @@ func FuzzyMatchV2(caseSensitive bool, normalize bool, forward bool, input *util.
 		f := int(f)
 		pchar := Psub[off]
 		pidx := off + 1
-		row := pidx * width
+		row := (pidx & rowMask) * width
+		prevRow := ((pidx - 1) & rowMask) * width
 		inGap := false
 		Tsub := T[f : lastIdx+1]
 		Bsub := B[f:][:len(Tsub)]
 		Csub := C[row+f-f0:][:len(Tsub)]
-		Cdiag := C[row+f-f0-1-width:][:len(Tsub)]
+		Cdiag := C[prevRow+f-f0-1:][:len(Tsub)]
 		Hsub := H[row+f-f0:][:len(Tsub)]
-		Hdiag := H[row+f-f0-1-width:][:len(Tsub)]
+		Hdiag := H[prevRow+f-f0-1:][:len(Tsub)]
 		Hleft := H[row+f-f0-1:][:len(Tsub)]
 		Hleft[0] = 0
 		for off, char := range Tsub {
@@ -906,10 +915,16 @@ func FuzzyMatchV2(caseSensitive bool, normalize bool, forward bool, input *util.
 
 			inGap = s1 < s2
 			score := max(s1, s2, 0)
-			if pidx == M-1 && (forward && score > maxScore || !forward && score >= maxScore) {
-				maxScore, maxScorePos = score, col
-			}
 			Hsub[off] = score
+		}
+	}
+	// Only the final pattern row contributes to the match score.
+	lastStart := int(F[M-1])
+	lastOffset := ((M - 1) & rowMask) * width
+	lastRow := H[lastOffset+lastStart-f0 : lastOffset+width]
+	for off, score := range lastRow {
+		if forward && score > maxScore || !forward && score >= maxScore {
+			maxScore, maxScorePos = score, lastStart+off
 		}
 	}
 

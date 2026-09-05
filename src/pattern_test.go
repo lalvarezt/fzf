@@ -138,7 +138,7 @@ func TestOrigTextAndTransformed(t *testing.T) {
 			origText:    &origBytes,
 			transformed: &transformed{pattern.revision, trans}}
 		pattern.extended = extended
-		matches, _ := pattern.matchChunk(&chunk, nil, slab) // No cache
+		matches, _ := pattern.matchChunk(&chunk, nil, slab, nil) // No cache
 		if !(matches[0].item.text.ToString() == "junegunn" &&
 			string(*matches[0].item.origText) == "junegunn.choi" &&
 			reflect.DeepEqual((*matches[0].item.transformed).tokens, trans)) {
@@ -230,6 +230,32 @@ func buildPatternWith(cache *ChunkCache, runes []rune) *Pattern {
 	return BuildPattern(cache, make(map[string]*Pattern),
 		true, algo.FuzzyMatchV2, true, CaseSmart, false, true,
 		false, true, []Range{}, Delimiter{}, revision{}, runes, nil, 0)
+}
+
+func TestMatchInto(t *testing.T) {
+	chunks := buildChunks(8)
+	for _, query := range []string{"serv", "'service", "src !test", "missing"} {
+		cache := NewChunkCache()
+		pattern := buildPatternWith(cache, []rune(query))
+		var want []Result
+		for _, chunk := range chunks {
+			want = append(want, pattern.Match(chunk, slab)...)
+		}
+		cache.Clear()
+		for pass := range 2 {
+			prefix := Result{points: [4]uint16{1, 2, 3, 4}}
+			got := []Result{prefix}
+			for _, chunk := range chunks {
+				got = pattern.matchInto(chunk, slab, got)
+				if query == "serv" && cache.Lookup(chunk, pattern.CacheKey()) == nil {
+					t.Fatalf("query %q: chunk results were not cached", query)
+				}
+			}
+			if got[0] != prefix || !reflect.DeepEqual(got[1:], append([]Result{}, want...)) {
+				t.Fatalf("query %q, pass %d: appended results differ", query, pass)
+			}
+		}
+	}
 }
 
 func TestBitmapCacheBenefit(t *testing.T) {

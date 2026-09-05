@@ -302,6 +302,11 @@ func (p *Pattern) CacheKey() string {
 
 // Match returns the list of matches Items in the given Chunk
 func (p *Pattern) Match(chunk *Chunk, slab *util.Slab) []Result {
+	return p.matchInto(chunk, slab, []Result{})
+}
+
+func (p *Pattern) matchInto(chunk *Chunk, slab *util.Slab, matches []Result) []Result {
+	start := len(matches)
 	cacheKey := p.CacheKey()
 
 	// Bitmap cache: exact match or prefix/suffix
@@ -313,16 +318,15 @@ func (p *Pattern) Match(chunk *Chunk, slab *util.Slab) []Result {
 		cachedBitmap = p.cache.Search(chunk, cacheKey)
 	}
 
-	matches, bitmap := p.matchChunk(chunk, cachedBitmap, slab)
+	matches, bitmap := p.matchChunk(chunk, cachedBitmap, slab, matches)
 
 	if p.cacheable {
-		p.cache.Add(chunk, cacheKey, bitmap, len(matches))
+		p.cache.Add(chunk, cacheKey, bitmap, len(matches)-start)
 	}
 	return matches
 }
 
-func (p *Pattern) matchChunk(chunk *Chunk, cachedBitmap *ChunkBitmap, slab *util.Slab) ([]Result, ChunkBitmap) {
-	matches := []Result{}
+func (p *Pattern) matchChunk(chunk *Chunk, cachedBitmap *ChunkBitmap, slab *util.Slab, matches []Result) ([]Result, ChunkBitmap) {
 	var bitmap ChunkBitmap
 
 	// Skip header items in chunks that contain them
