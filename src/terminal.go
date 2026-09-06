@@ -1554,6 +1554,14 @@ func (t *Terminal) visibleInputLinesInList() int {
 
 // Extra number of lines needed to display fzf
 func (t *Terminal) extraLines() int {
+	// borderLines() reports zero for BorderInline, but addInline() still
+	// reserves a divider line for it
+	sectionLines := func(shape tui.BorderShape) int {
+		if shape == tui.BorderInline {
+			return 1
+		}
+		return borderLines(shape)
+	}
 	extra := 0
 	if !t.inputless {
 		extra++
@@ -1569,16 +1577,16 @@ func (t *Terminal) extraLines() int {
 	}
 	if t.headerVisible {
 		if t.hasHeaderWindow() {
-			extra += borderLines(t.headerBorderShape)
+			extra += sectionLines(t.headerBorderShape)
 		}
 		extra += len(t.header0)
 		if w, shape := t.determineHeaderLinesShape(); w {
-			extra += borderLines(shape)
+			extra += sectionLines(shape)
 		}
 		extra += t.headerLines
 	}
 	if len(t.footer) > 0 {
-		extra += borderLines(t.footerBorderShape)
+		extra += sectionLines(t.footerBorderShape)
 		extra += len(t.footer)
 	}
 	return extra
@@ -2059,7 +2067,9 @@ func (t *Terminal) UpdateList(result MatchResult) {
 		prevIndex = t.targetIndex
 		t.targetIndex = minItem.Index()
 	}
-	t.progress = 100
+	if result.final() {
+		t.progress = 100
+	}
 	t.merger = merger
 	t.resultMerger = merger
 	t.passMerger = result.passMerger
@@ -8645,6 +8655,7 @@ func (t *Terminal) Loop() error {
 		reload := changed || newCommand != nil
 		if reload {
 			t.wait.searching = true
+			t.progress = 0
 		}
 		var reloadRequest *searchRequest
 		if reload {
