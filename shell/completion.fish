@@ -79,11 +79,11 @@ function fzf_complete -w fzf -d 'fzf command completion and wildcard expansion s
     or set -- custom_post_func _fzf_complete_$cmd[1]_post
 
     if functions -q $custom_post_func
-      $fzf_cmd | $custom_post_func $cmd | while read -l r; set -a -- result $r; end
+      set -- result ($fzf_cmd | $custom_post_func $cmd | string split \n)
     else if string match -q -- '*--print0*' "$FZF_DEFAULT_OPTS"
-      $fzf_cmd | while read -lz r; set -a -- result $r; end
+      set -- result ($fzf_cmd | string split0)
     else
-      $fzf_cmd | while read -l r; set -a -- result $r; end
+      set -- result ($fzf_cmd | string split \n)
     end
 
   # Wildcard expansion
