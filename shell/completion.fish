@@ -124,7 +124,7 @@ function fzf_complete -w fzf -d 'fzf command completion and wildcard expansion s
 
       # Determine the tabstop length for description alignment
       set -l -- max_columns (math $COLUMNS - 40)
-      for len in (string length -V -- (string split -f 1 -- \t (string match -- '*'\t'*' $list[1..500])))
+      for len in (string match -r -- '^[^\\t]*(?=\\t)' $list[1..500] | string length -V)
         test "$len" -gt "$tabstop" -a "$len" -lt "$max_columns"
         and set -- tabstop $len
       end

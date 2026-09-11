@@ -280,7 +280,7 @@ func TestPathnameTiebreak(t *testing.T) {
 	score := 100
 	test := func(input string, offset Offset, expected uint16) {
 		for _, chars := range []util.Chars{util.ToChars([]byte(input)), util.RunesToChars([]rune(input))} {
-			item := buildResult(withIndex(&Item{text: chars}, 1), []Offset{offset}, score)
+			item := buildResult(withIndex(&Item{text: chars}, 1), []Offset{offset}, score, nil)
 			if item.points[3] != math.MaxUint16-uint16(score) || item.points[2] != expected {
 				t.Error(input, item.points, expected)
 			}
