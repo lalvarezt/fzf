@@ -2999,8 +2999,8 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			if opts.FrecencyScaleFactor, err = atof(str); err != nil {
 				return err
 			}
-			if opts.FrecencyScaleFactor <= 0 {
-				return errors.New("scale factor must be positive")
+			if math.IsNaN(opts.FrecencyScaleFactor) || math.IsInf(opts.FrecencyScaleFactor, 0) || opts.FrecencyScaleFactor <= 0 {
+				return errors.New("scale factor must be finite and positive")
 			}
 		case "--frecency-half-life":
 			str, err := nextString("duration required")
@@ -3032,7 +3032,7 @@ func parseOptions(index *int, opts *Options, allArgs []string) error {
 			if opts.FrecencyMomentumBoost, err = atof(str); err != nil {
 				return err
 			}
-			if opts.FrecencyMomentumBoost < 0 || opts.FrecencyMomentumBoost > 1 {
+			if math.IsNaN(opts.FrecencyMomentumBoost) || opts.FrecencyMomentumBoost < 0 || opts.FrecencyMomentumBoost > 1 {
 				return errors.New("momentum boost must be between 0.0 and 1.0")
 			}
 		case "--no-mouse":

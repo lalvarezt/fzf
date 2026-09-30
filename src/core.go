@@ -109,7 +109,7 @@ func Run(opts *Options) (int, error) {
 
 			// Save on exit (only for normal operation)
 			defer func() {
-				if frecencyDB != nil && frecencyDB.dirty {
+				if frecencyDB != nil {
 					if err := frecencyDB.Save(); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: could not save frecency database: %v\n", err)
 					}
@@ -668,7 +668,11 @@ func Run(opts *Options) (int, error) {
 									}
 									transformer := buildItemTransformer(opts)
 									for i := range count {
-										opts.Printer(transformer(merger.Get(i).item))
+										item := merger.Get(i).item
+										if frecencyDB != nil {
+											frecencyDB.UpdateItem(item)
+										}
+										opts.Printer(transformer(item))
 									}
 									if count == 0 {
 										exitCode = ExitNoMatch

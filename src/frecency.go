@@ -134,7 +134,26 @@ func (c *scoreCache) Delete(key string) {
 
 func (c *scoreCache) Replace(values map[string]uint16, generation uint32) {
 	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
 	old := c.values.Load()
+	if old != nil && len(*old) == len(values) {
+		sameKeys := true
+		for key := range values {
+			if _, ok := (*old)[key]; !ok {
+				sameKeys = false
+				break
+			}
+		}
+		if sameKeys {
+			for key, score := range values {
+				(*old)[key].store(score, generation)
+			}
+			c.pending.Clear()
+			c.pendingCount.Store(0)
+			return
+		}
+	}
 	next := make(map[string]*scoreValue, len(values))
 	for key, score := range values {
 		var value *scoreValue
@@ -155,7 +174,6 @@ func (c *scoreCache) Replace(values map[string]uint16, generation uint32) {
 	c.values.Store(&next)
 	c.pending.Clear()
 	c.pendingCount.Store(0)
-	c.mutex.Unlock()
 }
 
 func (c *scoreCache) compactLocked() {
@@ -348,11 +366,11 @@ func (db *FrecencyDB) Load() error {
 // Returns nil without doing anything if the database is not dirty
 func (db *FrecencyDB) Save() error {
 	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
 	if !db.dirty {
-		db.mutex.Unlock()
 		return nil
 	}
-	db.mutex.Unlock()
 
 	// Create parent directory if it doesn't exist
 	dir := filepath.Dir(db.path)
@@ -365,19 +383,17 @@ func (db *FrecencyDB) Save() error {
 		return fmt.Errorf("failed to create temporary file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
 
 	// Ensure cleanup on error
 	defer func() {
 		if tmpFile != nil {
 			tmpFile.Close()
-			os.Remove(tmpPath)
 		}
 	}()
 
-	db.mutex.RLock()
 	encoder := gob.NewEncoder(tmpFile)
 	err = encoder.Encode(db.entries)
-	db.mutex.RUnlock()
 
 	if err != nil {
 		return fmt.Errorf("failed to encode frecency database: %w", err)
@@ -397,9 +413,7 @@ func (db *FrecencyDB) Save() error {
 	}
 
 	// Clear dirty flag after successful save
-	db.mutex.Lock()
 	db.dirty = false
-	db.mutex.Unlock()
 
 	return nil
 }
