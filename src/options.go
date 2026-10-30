@@ -1756,15 +1756,15 @@ func init() {
 }
 
 func maskActionContents(action string) string {
-	masked := ""
+	var sb strings.Builder
 Loop:
 	for len(action) > 0 {
 		loc := argActionRegexp.FindStringIndex(action)
 		if loc == nil {
-			masked += action
+			sb.WriteString(action)
 			break
 		}
-		masked += action[:loc[1]]
+		sb.WriteString(action[:loc[1]])
 		action = action[loc[1]:]
 		if len(action) == 0 {
 			break
@@ -1773,7 +1773,7 @@ Loop:
 		var ce string
 		switch action[0] {
 		case ':':
-			masked += strings.Repeat(" ", len(action))
+			sb.WriteString(strings.Repeat(" ", len(action)))
 			break Loop
 		case '(':
 			ce = ")"
@@ -1794,7 +1794,7 @@ Loop:
 		// @$ or @+
 		loc = regexp.MustCompile(fmt.Sprintf(`(?s)^%s.*?(%s[+,]|%s$)`, cs, ce, ce)).FindStringIndex(action)
 		if loc == nil {
-			masked += action
+			sb.WriteString(action)
 			break
 		}
 		// Keep + or , at the end
@@ -1802,9 +1802,10 @@ Loop:
 		if lastChar == '+' || lastChar == ',' {
 			loc[1]--
 		}
-		masked += strings.Repeat(" ", loc[1])
+		sb.WriteString(strings.Repeat(" ", loc[1]))
 		action = action[loc[1]:]
 	}
+	masked := sb.String()
 	masked = strings.ReplaceAll(masked, ",,,", string([]rune{',', escapedComma, ','}))
 	masked = strings.ReplaceAll(masked, ",:,", string([]rune{',', escapedColon, ','}))
 	masked = strings.ReplaceAll(masked, "::", string([]rune{escapedColon, ':'}))
