@@ -80,6 +80,8 @@ func NewMatcher(cache *ChunkCache, patternBuilder func([]rune) *Pattern,
 // Loop puts Matcher in action
 func (m *Matcher) Loop() {
 	prevCount := 0
+	var frecencyDB *FrecencyDB
+	var frecencyGeneration uint32
 
 	for {
 		var request MatchRequest
@@ -104,14 +106,21 @@ func (m *Matcher) Loop() {
 			break
 		}
 
+		db := request.pattern.frecencyDB
+		var generation uint32
+		if db != nil {
+			generation = db.scoreGen.Load()
+		}
 		cacheCleared := false
-		if request.sort != m.sort || request.revision != m.revision {
+		if request.sort != m.sort || request.revision != m.revision || db != frecencyDB || generation != frecencyGeneration {
 			m.sort = request.sort
 			m.mergerCache = make(map[string]MatchResult)
 			if !request.revision.compatible(m.revision) {
 				m.cache.Clear()
 			}
 			m.revision = request.revision
+			frecencyDB = db
+			frecencyGeneration = generation
 			cacheCleared = true
 		}
 

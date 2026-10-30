@@ -198,8 +198,9 @@ func (c *scoreCache) compactLocked() {
 // FrecencyDB manages the frecency database
 type FrecencyDB struct {
 	entries          map[string]*FrecencyEntry
-	scores           scoreCache // Cached scaled scores (string -> uint16)
-	itemScores       sync.Map   // Cached per-item scores (*Item -> *cachedItemScore)
+	scoreBuffer      map[string]uint16 // Rebuild workspace, protected by mutex
+	scores           scoreCache        // Cached scaled scores (string -> uint16)
+	itemScores       sync.Map          // Cached per-item scores (*Item -> *cachedItemScore)
 	itemScoreCount   atomic.Uint32
 	itemScoreTable   atomic.Pointer[itemScoreCacheTable]
 	scoreChangeFloor atomic.Uint32
@@ -210,12 +211,31 @@ type FrecencyDB struct {
 	path             string
 	mutex            sync.RWMutex
 	dirty            bool
+	operations       []frecencyOperation
 	stripAnsi        bool
 	scaleFactor      float64
 	halfLife         time.Duration
 	momentumWindow   time.Duration
 	momentumBoost    float64
 }
+
+type frecencyOperation struct {
+	key       string
+	kind      frecencyOperationKind
+	timestamp int64
+}
+
+type frecencyOperationKind uint8
+
+const (
+	frecencySelect frecencyOperationKind = iota
+	frecencyBuff
+	frecencyNerf
+	frecencyRemove
+)
+
+// POSIX record locks are process-wide on platforms without flock.
+var frecencySaveMutex sync.Mutex
 
 type cachedItemScore struct {
 	item          *Item
@@ -320,50 +340,58 @@ func getDefaultFrecencyPath() (string, error) {
 // Returns nil if the file doesn't exist (first run)
 // Warns to stderr if the file is corrupted and returns empty database
 func (db *FrecencyDB) Load() error {
-	file, err := os.Open(db.path)
+	entries, err := loadFrecencyEntries(db.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			// First run - not an error
-			return nil
-		}
-		return fmt.Errorf("failed to open frecency database: %w", err)
+		return err
 	}
-	defer file.Close()
-
-	decoder := gob.NewDecoder(file)
-	var entries map[string]*FrecencyEntry
-	err = decoder.Decode(&entries)
-	if err != nil {
-		if err == io.EOF {
-			// Empty file - not an error
-			return nil
-		}
-		// Corrupted file - warn but continue with empty database
-		fmt.Fprintf(os.Stderr, "Warning: frecency database is corrupted, starting fresh: %v\n", err)
-		// Optionally backup the corrupted file
-		backupPath := db.path + ".backup"
-		if copyErr := copyFile(db.path, backupPath); copyErr == nil {
-			fmt.Fprintf(os.Stderr, "Backed up corrupted database to: %s\n", backupPath)
-		}
-		return nil
-	}
-
 	db.mutex.Lock()
 	db.entries = entries
 	db.sessionTime = time.Now()
 	db.dirty = false
-
-	// Calculate all scores after loading entries using frozen sessionTime.
+	db.operations = nil
 	db.rebuildScores()
-
 	db.mutex.Unlock()
 	db.InvalidateItemScoreCache()
 	return nil
 }
 
-// Save writes the frecency database to disk atomically
-// Uses temp file + rename to ensure atomicity
-// Returns nil without doing anything if the database is not dirty
+func loadFrecencyEntries(path string) (map[string]*FrecencyEntry, error) {
+	entries := make(map[string]*FrecencyEntry)
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// First run - not an error
+			return entries, nil
+		}
+		return nil, fmt.Errorf("failed to open frecency database: %w", err)
+	}
+	defer file.Close()
+
+	decoder := gob.NewDecoder(file)
+	err = decoder.Decode(&entries)
+	if err != nil {
+		if err == io.EOF {
+			// Empty file - not an error
+			return make(map[string]*FrecencyEntry), nil
+		}
+		// Corrupted file - warn but continue with empty database
+		fmt.Fprintf(os.Stderr, "Warning: frecency database is corrupted, starting fresh: %v\n", err)
+		// Optionally backup the corrupted file
+		backupPath := path + ".backup"
+		if copyErr := copyFile(path, backupPath); copyErr == nil {
+			fmt.Fprintf(os.Stderr, "Backed up corrupted database to: %s\n", backupPath)
+		}
+		return make(map[string]*FrecencyEntry), nil
+	}
+	if entries == nil {
+		entries = make(map[string]*FrecencyEntry)
+	}
+	return entries, nil
+}
+
+// Save replays pending actions against the latest history under a shared-file
+// lock, then atomically replaces the database using a temporary file and rename.
+// Failed saves retain pending actions for retry. Clean databases do no I/O.
 func (db *FrecencyDB) Save() error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -376,6 +404,24 @@ func (db *FrecencyDB) Save() error {
 	dir := filepath.Dir(db.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("failed to create frecency database directory: %w", err)
+	}
+
+	frecencySaveMutex.Lock()
+	defer frecencySaveMutex.Unlock()
+	lock, err := os.OpenFile(db.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("failed to open frecency database lock: %w", err)
+	}
+	defer lock.Close()
+	if err := lockFrecencyFile(lock); err != nil {
+		return fmt.Errorf("failed to lock frecency database: %w", err)
+	}
+	entries, err := loadFrecencyEntries(db.path)
+	if err != nil {
+		return err
+	}
+	for _, op := range db.operations {
+		applyFrecencyOperation(entries, op)
 	}
 
 	tmpFile, err := os.CreateTemp(dir, ".frecency.gob.tmp.*")
@@ -393,7 +439,7 @@ func (db *FrecencyDB) Save() error {
 	}()
 
 	encoder := gob.NewEncoder(tmpFile)
-	err = encoder.Encode(db.entries)
+	err = encoder.Encode(entries)
 
 	if err != nil {
 		return fmt.Errorf("failed to encode frecency database: %w", err)
@@ -413,7 +459,11 @@ func (db *FrecencyDB) Save() error {
 	}
 
 	// Clear dirty flag after successful save
+	db.entries = entries
+	db.operations = nil
 	db.dirty = false
+	db.rebuildScores()
+	db.InvalidateItemScoreCache()
 
 	return nil
 }
@@ -432,7 +482,13 @@ func (db *FrecencyDB) calculateAndStoreScoreAtGeneration(item string, entry *Fre
 }
 
 func (db *FrecencyDB) rebuildScores() {
-	scores := make(map[string]uint16, len(db.entries))
+	scores := db.scoreBuffer
+	if scores == nil {
+		scores = make(map[string]uint16, len(db.entries))
+		db.scoreBuffer = scores
+	} else {
+		clear(scores)
+	}
 	for item, entry := range db.entries {
 		rawScore, _, _, _ := db.scoreComponents(entry, db.sessionTime)
 		scores[item] = uint16(math.Min(rawScore*db.scaleFactor, 65535))
@@ -690,33 +746,7 @@ func (db *FrecencyDB) UpdateItem(item *Item) {
 // Update increments the frequency counter and updates the timestamp for an item
 // Creates a new entry if the item doesn't exist
 func (db *FrecencyDB) Update(item string) {
-	now := time.Now().Unix()
-
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
-
-	entry, exists := db.entries[item]
-	if exists {
-		// Update existing entry
-		if entry.Frequency < math.MaxUint32 {
-			entry.Frequency++
-		}
-		if entry.LastAccess > 0 {
-			entry.PrevAccess = entry.LastAccess
-		}
-		entry.LastAccess = now
-	} else {
-		// Create new entry
-		entry = &FrecencyEntry{
-			Frequency:   1,
-			FirstAccess: now,
-			LastAccess:  now,
-		}
-		db.entries[item] = entry
-	}
-	// Recalculate score for this item using frozen sessionTime
-	db.updateScore(item, entry)
-	db.dirty = true
+	db.applyOperation(frecencyOperation{item, frecencySelect, time.Now().Unix()})
 }
 
 // BuffItem increments the frequency counter for an item.
@@ -727,30 +757,7 @@ func (db *FrecencyDB) BuffItem(item *Item) {
 // Buff increments the frequency counter for an item
 // Creates a new entry if the item doesn't exist
 func (db *FrecencyDB) Buff(item string) {
-	now := time.Now().Unix()
-
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
-
-	entry, exists := db.entries[item]
-	if exists {
-		// Increment frequency with overflow check
-		if entry.Frequency < math.MaxUint32 {
-			entry.Frequency++
-		}
-	} else {
-		// Create new entry
-		entry = &FrecencyEntry{
-			Frequency:   1,
-			FirstAccess: now,
-			LastAccess:  now,
-		}
-		db.entries[item] = entry
-	}
-
-	// Recalculate score for this item using frozen sessionTime
-	db.updateScore(item, entry)
-	db.dirty = true
+	db.applyOperation(frecencyOperation{item, frecencyBuff, time.Now().Unix()})
 }
 
 // NerfItem decrements the frequency counter for an item.
@@ -762,32 +769,7 @@ func (db *FrecencyDB) NerfItem(item *Item) {
 // Removes the entry if frequency reaches 0
 // Does nothing if the item doesn't exist
 func (db *FrecencyDB) Nerf(item string) {
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
-
-	entry, exists := db.entries[item]
-	if !exists {
-		return
-	}
-
-	// Decrement frequency
-	if entry.Frequency > 0 {
-		entry.Frequency--
-	}
-
-	// Remove entry if frequency reaches 0
-	if entry.Frequency == 0 {
-		delete(db.entries, item)
-		db.scores.Delete(item)
-	} else {
-		// Recalculate score for this item using frozen sessionTime
-		db.updateScore(item, entry)
-	}
-
-	db.dirty = true
-	if entry.Frequency == 0 {
-		db.invalidateScoreGeneration(item)
-	}
+	db.applyOperation(frecencyOperation{key: item, kind: frecencyNerf})
 }
 
 // RemoveItem deletes an entry for an item from the frecency database.
@@ -798,18 +780,65 @@ func (db *FrecencyDB) RemoveItem(item *Item) {
 // Remove deletes an entry from the frecency database
 // Does nothing if the item doesn't exist
 func (db *FrecencyDB) Remove(item string) {
+	db.applyOperation(frecencyOperation{key: item, kind: frecencyRemove})
+}
+
+func (db *FrecencyDB) applyOperation(op frecencyOperation) {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
-
-	_, exists := db.entries[item]
-	if !exists {
+	if !applyFrecencyOperation(db.entries, op) {
 		return
 	}
-
-	delete(db.entries, item)
-	db.scores.Delete(item)
+	db.operations = append(db.operations, op)
+	if entry := db.entries[op.key]; entry != nil {
+		db.updateScore(op.key, entry)
+	} else {
+		db.scores.Delete(op.key)
+		db.invalidateScoreGeneration(op.key)
+	}
 	db.dirty = true
-	db.invalidateScoreGeneration(item)
+}
+
+// Replay pending actions against the latest disk history while holding its lock.
+func applyFrecencyOperation(entries map[string]*FrecencyEntry, op frecencyOperation) bool {
+	entry := entries[op.key]
+	switch op.kind {
+	case frecencyRemove:
+		if entry == nil {
+			return false
+		}
+		delete(entries, op.key)
+	case frecencyNerf:
+		if entry == nil {
+			return false
+		}
+		if entry.Frequency > 1 {
+			entry.Frequency--
+		} else {
+			delete(entries, op.key)
+		}
+	case frecencySelect, frecencyBuff:
+		if entry == nil {
+			entries[op.key] = &FrecencyEntry{Frequency: 1, FirstAccess: op.timestamp, LastAccess: op.timestamp}
+			return true
+		}
+		if entry.Frequency < math.MaxUint32 {
+			entry.Frequency++
+		}
+		if op.kind == frecencySelect {
+			// Sessions may save in a different order from their selections.
+			if op.timestamp >= entry.LastAccess {
+				entry.PrevAccess = entry.LastAccess
+				entry.LastAccess = op.timestamp
+			} else if op.timestamp > entry.PrevAccess {
+				entry.PrevAccess = op.timestamp
+			}
+			if entry.FirstAccess == 0 || op.timestamp < entry.FirstAccess {
+				entry.FirstAccess = op.timestamp
+			}
+		}
+	}
+	return true
 }
 
 // copyFile copies a file from src to dst

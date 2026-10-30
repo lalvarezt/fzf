@@ -1,8 +1,10 @@
 package fzf
 
 import (
+	"fmt"
+	"path/filepath"
+	"reflect"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,56 +27,96 @@ func prepareFrecencyScoreItem(text string) (*FrecencyDB, *Item) {
 	return db, &Item{text: util.ToChars([]byte(text))}
 }
 
-func TestGetScoreForItemInvalidation(t *testing.T) {
-	db, item := prepareFrecencyScoreItem("file-漢-001.txt")
-
-	first := db.GetScoreForItem(item)
-	if first == 0 {
-		t.Fatal("expected non-zero score")
-	}
-
-	again := db.GetScoreForItem(item)
-	if again != first {
-		t.Fatalf("expected cached score %d, got %d", first, again)
-	}
-	cached, ok := db.itemScores.Load(item)
-	if !ok {
-		t.Fatal("expected cached item score")
-	}
-	firstGen := atomic.LoadUint32(&cached.(*cachedItemScore).generation)
-
-	db.Buff("file-漢-001.txt")
-	updated := db.GetScoreForItem(item)
-	if updated != db.GetScore("file-漢-001.txt") {
-		t.Fatalf("expected updated score %d, got %d", db.GetScore("file-漢-001.txt"), updated)
-	}
-	cached, ok = db.itemScores.Load(item)
-	if !ok {
-		t.Fatal("expected updated cached item score")
-	}
-	if atomic.LoadUint32(&cached.(*cachedItemScore).generation) == firstGen {
-		t.Fatal("expected generation bump after DB update")
-	}
-}
-
-func TestGetScoreForItemUsesOriginalText(t *testing.T) {
-	db := NewFrecencyDB("", 3150.0, 30*24*time.Hour, 6*time.Hour, 0.5)
-	original := []byte("alpha beta gamma")
-	item := &Item{
-		text:     util.ToChars([]byte("beta")),
-		origText: &original,
-	}
-
-	db.UpdateItem(item)
-
-	if db.GetScore("alpha beta gamma") == 0 {
-		t.Fatal("expected score to be stored under original item text")
-	}
-	if db.GetScore("beta") != 0 {
-		t.Fatal("did not expect score to be stored under transformed text")
-	}
-	if got := db.GetScoreForItem(item); got != db.GetScore("alpha beta gamma") {
-		t.Fatalf("expected item score %d, got %d", db.GetScore("alpha beta gamma"), got)
+func TestFrecencyItemLifecycle(t *testing.T) {
+	for _, mode := range []string{"ASCII", "Unicode", "transformed"} {
+		for _, indexed := range []bool{false, true} {
+			// Plain ASCII bypasses both per-item caches.
+			if mode == "ASCII" && indexed {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/indexed=%v", mode, indexed), func(t *testing.T) {
+				key := "file-a"
+				if mode != "ASCII" {
+					key = "file-漢"
+				}
+				item := &Item{text: util.ToChars([]byte(key))}
+				if mode == "transformed" {
+					original := []byte("\x1b[31m" + key + "\x1b[0m")
+					item.origText = &original
+					item.text = util.ToChars([]byte("display"))
+				}
+				db := NewFrecencyDB(filepath.Join(t.TempDir(), "frecency.gob"), 3150, 30*24*time.Hour, 6*time.Hour, .5)
+				db.stripAnsi = true
+				if indexed {
+					db.prepareItemScoreTable(0, 1)
+				}
+				if got := db.GetScoreForItem(item); got != 0 {
+					t.Fatalf("unseen item scored %d", got)
+				}
+				for _, step := range []struct {
+					name      string
+					act       func(*Item)
+					frequency uint32
+				}{
+					{"nerf unseen", db.NerfItem, 0},
+					{"remove unseen", db.RemoveItem, 0},
+					{"select", db.UpdateItem, 1},
+					{"repeat", db.UpdateItem, 2},
+					{"buff", db.BuffItem, 3},
+					{"nerf", db.NerfItem, 2},
+					{"remove", db.RemoveItem, 0},
+					{"buff unseen", db.BuffItem, 1},
+					{"nerf last use", db.NerfItem, 0},
+					{"select again", db.UpdateItem, 1},
+				} {
+					t.Run(step.name, func(t *testing.T) {
+						var before FrecencyEntry
+						if entry := db.entries[key]; entry != nil {
+							before = *entry
+						}
+						step.act(item)
+						entry := db.entries[key]
+						if step.frequency == 0 {
+							if entry != nil || len(db.entries) != 0 {
+								t.Fatalf("removed item retained: %v", db.entries)
+							}
+						} else {
+							if entry == nil || entry.Frequency != step.frequency || len(db.entries) != 1 {
+								t.Fatalf("wrong history: %v", db.entries)
+							}
+							if before.Frequency != 0 {
+								if entry.FirstAccess != before.FirstAccess {
+									t.Fatal("first selection timestamp changed")
+								}
+								if step.name == "buff" || step.name == "nerf" {
+									if entry.LastAccess != before.LastAccess || entry.PrevAccess != before.PrevAccess {
+										t.Fatal("manual adjustment changed recency")
+									}
+								} else if entry.PrevAccess != before.LastAccess {
+									t.Fatal("repeat did not remember previous selection")
+								}
+							}
+						}
+						for range 2 {
+							got := db.GetScoreForItem(item)
+							if got != db.GetScore(key) || (got == 0) != (step.frequency == 0) {
+								t.Fatalf("stale score: %d, stored %d", got, db.GetScore(key))
+							}
+						}
+						if err := db.Save(); err != nil {
+							t.Fatal(err)
+						}
+						reloaded := NewFrecencyDB(db.path, 3150, 30*24*time.Hour, 6*time.Hour, .5)
+						if err := reloaded.Load(); err != nil {
+							t.Fatal(err)
+						}
+						if !reflect.DeepEqual(reloaded.entries, db.entries) {
+							t.Fatalf("history changed after save/load: %v", reloaded.entries)
+						}
+					})
+				}
+			})
+		}
 	}
 }
 
